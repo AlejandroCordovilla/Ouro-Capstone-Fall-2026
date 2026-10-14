@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from ouro_eval_lab.contracts import INTENT_FIELDS
 from ouro_eval_lab.runner import verify_manifest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,7 +39,9 @@ class PublicIntentClipTests(unittest.TestCase):
             root = Path(directory)
             manifest = root / "manifest.json"
             manifest.write_text(json.dumps({"artifacts": [{"relative_path": "clipX.mp4", "artifact_id": "syn-x"}]}))
-            body = json.dumps({"artifact_id": "syn-x", "relative_path": "clipX.mp4", "salt": "00"}).encode()
+            record = {"artifact_id": "syn-x", "relative_path": "clipX.mp4", "salt": "00"}
+            record.update({field: {"text": f"Synthetic {field}", "delivery": "implied"} for field in INTENT_FIELDS})
+            body = json.dumps(record).encode()
             (root / "clipX.intent.json").write_bytes(body)
             commitments = root / "c.sha256"
             commitments.write_text(f"{hashlib.sha256(body).hexdigest()}  clipX.intent.json\n")
@@ -54,6 +57,25 @@ class PublicIntentClipTests(unittest.TestCase):
                 f"{hashlib.sha256(b'x').hexdigest()}  clipY.intent.json\n"
             )
             self.assertEqual(len(reveal.verify(commitments, root, manifest)), 2)
+
+    def test_reveal_check_validates_committed_records_against_the_contract(self):
+        reveal = _load("verify_intent_reveal")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "manifest.json"
+            manifest.write_text(json.dumps({"artifacts": [{"relative_path": "clipX.mp4", "artifact_id": "syn-x"}]}))
+            # Bytes that match their commitment can still carry a private or
+            # malformed field; the reveal must stop rather than load them.
+            record = {"artifact_id": "syn-x", "relative_path": "clipX.mp4", "salt": "00", "prompt": "internal"}
+            record.update({field: {"text": f"Synthetic {field}", "delivery": "implied"} for field in INTENT_FIELDS})
+            body = json.dumps(record).encode()
+            (root / "clipX.intent.json").write_bytes(body)
+            commitments = root / "c.sha256"
+            commitments.write_text(f"{hashlib.sha256(body).hexdigest()}  clipX.intent.json\n")
+            problems = reveal.verify(commitments, root, manifest)
+            self.assertEqual(len(problems), 1)
+            self.assertIn("forbidden/unknown fields: prompt", problems[0])
+            self.assertEqual(reveal.verify(commitments, root, manifest, schema=False), [])
 
 
 if __name__ == "__main__":

@@ -54,6 +54,7 @@ function harness(replies, mediaModes = [], storage = {entries: new Map()}) {
         const listeners = new Map();
         const node = {
           tag, setAttribute() {}, removeAttribute() {}, load() {},
+          play() { node.played = (node.played || 0) + 1; return Promise.resolve(); },
           addEventListener(name, callback) {
             if (!listeners.has(name)) listeners.set(name, new Set());
             listeners.get(name).add(callback);
@@ -581,4 +582,143 @@ test('an older media failure cannot clear a newer loaded assignment', async () =
   await firstLoad;
   assert.equal(lab.assignment().assignment_id, 'new');
   assert.equal(lab.element('submit').disabled, false);
+});
+
+test('a phone number is refused as a rater ID before any request', async () => {
+  for (const rater of ['305-555-0100', '3055550100', 'rater_3055550100']) {
+    const lab = harness([]);
+    lab.element('rater').value = rater;
+    await lab.signIn();
+    assert.equal(lab.requests.length, 0);
+    assert.match(lab.element('signin-error').textContent, /Do not use a phone number/);
+  }
+  const lab = harness([next(item('a'))]);
+  lab.element('rater').value = 'viewer-20261014';
+  await lab.signIn();
+  assert.equal(lab.assignment().assignment_id, 'a');
+});
+
+// Team C intent study (Stage 1). All answers below are synthetic test data.
+const INTENT_FIELDS = ['audience', 'problem', 'product', 'key_benefit', 'support', 'call_to_action', 'tone'];
+const clip = id => ({...item(id), modality: 'video', mime_type: 'video/mp4'});
+
+function intentNext(assignment, completed = 0) {
+  return {ok: true, body: {assignment, progress: {completed, total: 4}, study: 'intent', play_limit: 2}};
+}
+
+function fillIntent(lab, overrides = {}) {
+  const fields = {other_beats: ''};
+  for (const field of INTENT_FIELDS) {
+    fields[`${field}_recall`] = `Synthetic ${field}`;
+    fields[`${field}_certainty`] = '3';
+  }
+  fields.tone_recall = '';
+  fields.tone_certainty = null;
+  fields.tone_could_not_tell = '1';
+  lab.element('annotation-form').fields = {...fields, ...overrides};
+}
+
+async function watch(lab) {
+  await lab.element('play-clip').listeners.click();
+  lab.element('media').children[0].emit('ended');
+}
+
+test('intent study plays a limited clip and posts recall to its own endpoint', async () => {
+  const lab = harness([
+    intentNext(clip('a')),
+    {ok: true, body: {response_id: 'response-a', completed_at: 'synthetic'}},
+    intentNext(null, 1),
+  ]);
+  await lab.signIn();
+  assert.equal(lab.element('intent-fields').classList.contains('hidden'), false);
+  assert.equal(lab.element('annotation-fields').classList.contains('hidden'), true);
+  assert.equal(lab.element('decision-title').textContent, 'What was this ad trying to tell you?');
+  const video = lab.element('media').children[0];
+  assert.equal(video.controls, false);
+  assert.equal(lab.element('play-row').classList.contains('hidden'), false);
+  assert.equal(lab.element('plays-left').textContent, '2 of 2 plays left');
+
+  fillIntent(lab);
+  await lab.submit();
+  assert.equal(lab.requests.filter(request => request.method === 'POST').length, 0);
+  assert.match(lab.element('error').textContent, /Play the clip/);
+  assert.equal(lab.element('submit').disabled, false);
+
+  await lab.element('play-clip').listeners.click();
+  assert.equal(lab.element('play-clip').disabled, true);
+  video.emit('ended');
+  assert.equal(lab.element('play-clip').disabled, false);
+  await watch(lab);
+  assert.equal(lab.element('play-clip').disabled, true);
+  assert.equal(lab.element('plays-left').textContent, '0 of 2 plays left');
+  await lab.element('play-clip').listeners.click();
+  assert.equal(video.played, 2);
+
+  await lab.submit();
+  const saves = lab.requests.filter(request => request.method === 'POST');
+  assert.equal(saves.length, 1);
+  assert.equal(saves[0].url, '/api/intent-responses/a?rater=rater-a');
+  const body = JSON.parse(saves[0].body);
+  assert.deepEqual(Object.keys(body).sort(), ['components', 'other_beats', 'play_count']);
+  assert.equal(body.play_count, 2);
+  assert.deepEqual(Object.keys(body.components), INTENT_FIELDS);
+  assert.deepEqual(body.components.support, {recall: 'Synthetic support', certainty: 3, could_not_tell: false});
+  assert.deepEqual(body.components.tone, {recall: '', certainty: null, could_not_tell: true});
+  assert.equal(lab.element('done').classList.contains('hidden'), false);
+});
+
+test('incomplete or contradictory intent answers stay local and send nothing', async () => {
+  const lab = harness([intentNext(clip('a'))]);
+  await lab.signIn();
+  await watch(lab);
+  for (const [overrides, message] of [
+    [{tone_recall: 'calm'}, /untick “Could not tell” for the tone/],
+    [{support_certainty: null}, /rate how sure you are.*what backs it up/],
+    [{product_recall: '   '}, /rate how sure you are.*the product/],
+  ]) {
+    fillIntent(lab, overrides);
+    await lab.submit();
+    assert.match(lab.element('error').textContent, message);
+    assert.equal(lab.element('submit').disabled, false);
+  }
+  assert.equal(lab.requests.filter(request => request.method === 'POST').length, 0);
+  assert.equal(lab.storage.entries.has('ouro-eval-lab-pending-save-v1'), false);
+});
+
+test('interrupted intent save recovers in intent mode with the same bytes', async () => {
+  const storage = {entries: new Map()};
+  const beforeReload = harness([intentNext(clip('a')), new Promise(() => {})], [], storage);
+  await beforeReload.signIn();
+  await watch(beforeReload);
+  fillIntent(beforeReload);
+  const original = beforeReload.submit();
+  await flushAsync();
+  const originalRequest = beforeReload.requests.find(request => request.method === 'POST');
+  beforeReload.expireTimeouts();
+  await original;
+
+  const afterReload = harness([
+    {ok: true, body: {response_id: 'response-a', replayed: true}},
+    intentNext(clip('b'), 1),
+  ], [], storage);
+  await afterReload.signIn();
+  assert.equal(afterReload.requests.length, 0);
+  assert.equal(afterReload.element('intent-fields').classList.contains('hidden'), false);
+  await afterReload.retrySave();
+  const replay = afterReload.requests.find(request => request.method === 'POST');
+  assert.equal(replay.url, originalRequest.url);
+  assert.equal(replay.body, originalRequest.body);
+  assert.equal(afterReload.assignment().assignment_id, 'b');
+  assert.equal(storage.entries.has('ouro-eval-lab-pending-save-v1'), false);
+});
+
+test('an annotation receipt never confirms an intent save', async () => {
+  const lab = harness([intentNext(clip('a')), {ok: true, body: {annotation_id: 'wrong-kind'}}]);
+  await lab.signIn();
+  await watch(lab);
+  fillIntent(lab);
+  await lab.submit();
+  assert.equal(lab.assignment().assignment_id, 'a');
+  assert.match(lab.element('error').textContent, /Save status is unknown/);
+  assert.equal(lab.element('retry-save').classList.contains('hidden'), false);
 });
