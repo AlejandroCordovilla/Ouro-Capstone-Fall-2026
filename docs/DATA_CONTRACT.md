@@ -153,6 +153,21 @@ transaction. The first freeze closes collection: later new responses return
 original receipt. Exports contain the artifact SHA-256 but no artifact ID or
 filename. The freeze must exist before any intent record is revealed.
 
+### Reveal
+
+`reveal --db <db> --records <dir>` loads the sealed records into the lab. It
+refuses unless `intent_freezes` already holds a freeze, then runs the same
+commitment, manifest and contract checks as `scripts/verify_intent_reveal.py`,
+verifies the clip bytes against the manifest, and requires every clip to be
+loaded in the database. Any problem refuses the whole reveal; nothing partial
+is stored.
+
+A reveal appends one `intent_reveals` row (freeze ID and SHA-256, commitments
+file SHA-256, record count) and one `intent_records` row per clip (record
+SHA-256, artifact SHA-256, the exact committed record text, and the intent
+contract version). Both tables are append-only by trigger. Revealing the same
+records again changes nothing; revealing different records is refused.
+
 ## Adjudication
 
 Adjudication is stored as a separate append-only decision linked to annotations. It must never modify or delete a rater's original response.

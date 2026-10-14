@@ -12,6 +12,7 @@ from .runner import (
     agreement_report, export_annotations, export_intent_responses, inspect_native_avc,
     load_json, run_benchmark, verify_manifest,
 )
+from .reveal import DEFAULT_DIR as INTENT_DIR, RevealRefused, reveal
 from .store import STUDIES, connect, ingest, initialize, record_intent_freeze, study_conflict
 
 
@@ -59,6 +60,13 @@ def main(argv: list[str] | None = None) -> int:
     export.add_argument("--db", type=Path, required=True)
     export.add_argument("--out", type=Path, required=True)
     export.add_argument("--format", choices=["json", "csv"], default="json")
+    reveal_cmd = sub.add_parser(
+        "reveal", help="verify sealed intent records and load them; refused before export-intent",
+    )
+    reveal_cmd.add_argument("--db", type=Path, required=True)
+    reveal_cmd.add_argument("--records", type=Path, required=True, help="directory of revealed *.intent.json files")
+    reveal_cmd.add_argument("--commitments", type=Path, default=INTENT_DIR / "intent_commitments.sha256")
+    reveal_cmd.add_argument("--manifest", type=Path, default=INTENT_DIR / "manifest.json")
     export_intent = sub.add_parser(
         "export-intent", help="freeze Stage 1 intent responses before reveal; closes collection",
     )
@@ -125,6 +133,20 @@ def main(argv: list[str] | None = None) -> int:
         print(f"froze {count} intent responses to {args.out}")
         print(f"sha256 {digest}  freeze {freeze['freeze_id']}")
         print("intent collection is now closed; record this SHA-256 before any reveal")
+    elif args.command == "reveal":
+        if not args.db.is_file():
+            parser.error("reveal requires an existing local lab database")
+        initialize(args.db)
+        try:
+            with connect(args.db) as db:
+                db.execute("BEGIN IMMEDIATE")
+                result = reveal(db, args.records, args.commitments, args.manifest)
+        except RevealRefused as exc:
+            parser.error(str(exc))
+        if result["already_revealed"]:
+            print(f"already revealed: the same {result['record_count']} intent records; nothing changed")
+        else:
+            print(f"revealed {result['record_count']} intent records after freeze {result['freeze_sha256']}")
     elif args.command == "agreement":
         if not args.db.is_file():
             parser.error("agreement requires an existing local lab database")

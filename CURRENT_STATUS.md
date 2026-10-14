@@ -100,12 +100,15 @@ Intent Fidelity Stage 1 is implemented (Team C, Sprint 2):
 - blinded viewer capture: `serve --study intent`, a recall form with certainty
   and “could not tell”, a counted play limit, no repeat exposures, append-only
   `intent_responses`, and idempotent receipts;
-- `export-intent`, which freezes responses by SHA-256 and closes collection.
+- `export-intent`, which freezes responses by SHA-256 and closes collection;
+- `reveal`, which refuses until a freeze exists and loads verified records
+  into append-only tables bound to that freeze (Sprint 3);
+- a draft coding codebook, `docs/INTENT_CODEBOOK.md` (not yet calibrated or
+  frozen).
 
 Still missing:
 
-- reveal-after-freeze enforcement, the coding codebook, independent coder
-  comparison and adjudication (Sprint 3);
+- coder sheets, code import and adjudication records (Sprint 3);
 - thesis, hook, proof, offer, CTA, and critical-beat survival metrics, and
   coder agreement (Sprint 4);
 - separation between observable recovery and perceived persuasion in reporting.

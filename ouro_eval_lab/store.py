@@ -45,6 +45,26 @@ CREATE TABLE IF NOT EXISTS intent_freezes (
   freeze_id TEXT PRIMARY KEY, export_sha256 TEXT NOT NULL, export_format TEXT NOT NULL,
   response_count INTEGER NOT NULL, created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS intent_reveals (
+  reveal_id TEXT PRIMARY KEY, freeze_id TEXT NOT NULL, freeze_sha256 TEXT NOT NULL,
+  commitments_sha256 TEXT NOT NULL, record_count INTEGER NOT NULL, revealed_at TEXT NOT NULL,
+  FOREIGN KEY(freeze_id) REFERENCES intent_freezes(freeze_id)
+);
+CREATE TABLE IF NOT EXISTS intent_records (
+  record_sha256 TEXT PRIMARY KEY, reveal_id TEXT NOT NULL, artifact_sha256 TEXT UNIQUE NOT NULL,
+  artifact_id TEXT NOT NULL, relative_path TEXT NOT NULL, record_json TEXT NOT NULL,
+  intent_contract_version TEXT NOT NULL,
+  FOREIGN KEY(reveal_id) REFERENCES intent_reveals(reveal_id),
+  FOREIGN KEY(artifact_sha256) REFERENCES artifacts(sha256)
+);
+CREATE TRIGGER IF NOT EXISTS intent_reveals_no_update BEFORE UPDATE ON intent_reveals
+BEGIN SELECT RAISE(ABORT, 'intent reveals are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS intent_reveals_no_delete BEFORE DELETE ON intent_reveals
+BEGIN SELECT RAISE(ABORT, 'intent reveals are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS intent_records_no_update BEFORE UPDATE ON intent_records
+BEGIN SELECT RAISE(ABORT, 'revealed intent records are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS intent_records_no_delete BEFORE DELETE ON intent_records
+BEGIN SELECT RAISE(ABORT, 'revealed intent records are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS intent_responses_no_update BEFORE UPDATE ON intent_responses
 BEGIN SELECT RAISE(ABORT, 'intent responses are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS intent_responses_no_delete BEFORE DELETE ON intent_responses

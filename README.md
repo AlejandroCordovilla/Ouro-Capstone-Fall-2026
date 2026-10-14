@@ -86,6 +86,7 @@ python -m ouro_eval_lab.cli agreement --db data/lab.db --out data/exports/agreem
 python -m ouro_eval_lab.cli inspect-avc --manifest path/to/manifest.json --evaluation path/to/evaluation.json --out data/exports/native-avc-inspection.json
 python -m ouro_eval_lab.cli serve --db data/intent-demo.db --port 8080 --study intent --play-limit 2
 python -m ouro_eval_lab.cli export-intent --db data/intent-demo.db --out data/exports/intent-responses.json
+python -m ouro_eval_lab.cli reveal --db data/intent-demo.db --records path/to/revealed/records
 ```
 
 ## Non-negotiable boundaries
