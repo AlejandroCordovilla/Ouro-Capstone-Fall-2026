@@ -11,15 +11,14 @@ Notes in *italics* say where the work lives or where it differs from the plan.
 |---|---|
 | `team-c/sprint1-walking-skeleton` | Pushed. Sprint 1 docs. No PR (team approved). |
 | `team-c/sprint2-intent-capture` | Pushed. **PR #23** open into `JohnDoughh/Ouro-Capstone-Fall-2026` `main`; awaiting review and CI approval (fork PR). |
-| `team-c/sprint3-reveal-coding` | Branched from Sprint 2. Reveal command, codebook draft and this file are **not committed yet**. |
+| `team-c/sprint3-reveal-coding` | Pushed. Branched from Sprint 2: reveal command, codebook draft and this tracker. No PR yet (open one after PR #23 merges, or when Sprint 3 is complete). |
 
 **Next steps, in order**
 
-1. Commit and push `team-c/sprint3-reveal-coding`.
-2. Build coder sheets (`intent-coding-sheet`) and code import (`intent-import-codes`).
-3. Propose the adjudication record shape to the Team A and B delegates, then build it.
-4. Team: calibrate the codebook on the practice anchors; freeze it with the pre-registration.
-5. Team: send the sponsor questions (record format, vocabulary, `offer`/`required_beats`, custodian); name the open roles.
+1. Build coder sheets (`intent-coding-sheet`) and code import (`intent-import-codes`).
+2. Propose the adjudication record shape to the Team A and B delegates, then build it.
+3. Team: calibrate the codebook on the practice anchors; freeze it with the pre-registration.
+4. Team: send the sponsor questions (record format, vocabulary, `offer`/`required_beats`, custodian); name the open roles.
 
 **Known issues**
 
@@ -97,7 +96,7 @@ The repo is a v0.1 public-safe scaffold (Python 3.11 stdlib, SQLite, vanilla-JS 
 
 ## Sprint 3: Reveal + independent coding (Stage 2) + adjudication
 
-*Branch `team-c/sprint3-reveal-coding` (uncommitted).*
+*Branch `team-c/sprint3-reveal-coding` (pushed).*
 
 - [~] `docs/INTENT_CODEBOOK.md` *(draft v0.1: scale, decision rules, delivery-code rules including `not_intended` → `not_applicable`, component guidance, invented practice anchors not from the study set, calibration procedure. Needs team calibration and freezing.)*
 - [x] `reveal` CLI: refuses unless an `export-intent` freeze exists, runs the reveal checks, validates, loads records with `record_sha256` *(tables `intent_reveals`, which plays the role of `reveal_log`, and `intent_records`; both append-only; repeat reveal is a no-op; different records refused)*
