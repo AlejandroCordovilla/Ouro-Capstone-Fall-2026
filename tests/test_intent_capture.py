@@ -25,8 +25,8 @@ from ouro_eval_lab.contracts import (
 )
 from ouro_eval_lab.runner import export_intent_responses
 from ouro_eval_lab.store import (
-    CollectionFrozen, connect, ingest, next_assignment, record_intent_freeze, save_annotation,
-    save_intent_response, study_conflict,
+    CollectionFrozen, PlayRefused, connect, ingest, intent_plays_used, next_assignment,
+    record_intent_freeze, record_intent_play, save_annotation, save_intent_response, study_conflict,
 )
 
 
@@ -236,6 +236,7 @@ class IntentStoreTests(unittest.TestCase):
             db_path = ingest_synthetic(Path(directory))
             with database(db_path) as db:
                 assignment = next_assignment(db, "viewer-a", repeats=False)
+                record_intent_play(db, assignment["assignment_id"], "viewer-a", 1, 2)
                 save_intent_response(
                     db, assignment["assignment_id"], "viewer-a",
                     normalize_intent_response(intent_response()), 2,
@@ -243,6 +244,8 @@ class IntentStoreTests(unittest.TestCase):
                 record_intent_freeze(db, "a" * 64, "json", 1)
             for sql in ("UPDATE intent_responses SET other_beats='changed'",
                         "DELETE FROM intent_responses",
+                        "UPDATE intent_plays SET play_number=0",
+                        "DELETE FROM intent_plays",
                         "UPDATE intent_freezes SET export_sha256='b'",
                         "DELETE FROM intent_freezes"):
                 with self.subTest(sql), self.assertRaisesRegex(sqlite3.DatabaseError, "append-only"):
@@ -257,6 +260,7 @@ class IntentStoreTests(unittest.TestCase):
             normalized = normalize_intent_response(intent_response())
             with database(db_path) as db:
                 first = next_assignment(db, "viewer-a", repeats=False)
+                record_intent_play(db, first["assignment_id"], "viewer-a", 1, 2)
                 save_intent_response(db, first["assignment_id"], "viewer-a", normalized, 2)
                 with self.assertRaisesRegex(ValueError, "already completed"):
                     save_intent_response(db, first["assignment_id"], "viewer-a", normalized, 2)
@@ -266,6 +270,37 @@ class IntentStoreTests(unittest.TestCase):
                 second = next_assignment(db, "viewer-a", repeats=False)
                 with self.assertRaises(CollectionFrozen):
                     save_intent_response(db, second["assignment_id"], "viewer-a", normalized, 2)
+                # No exposure is recorded after the freeze either.
+                with self.assertRaises(CollectionFrozen):
+                    record_intent_play(db, second["assignment_id"], "viewer-a", 1, 2)
+
+    def test_play_starts_are_durable_ordered_limited_and_bind_the_response(self):
+        with scratch() as directory:
+            db_path = ingest_synthetic(Path(directory))
+            with database(db_path) as db:
+                aid = next_assignment(db, "viewer-a", repeats=False)["assignment_id"]
+                with self.assertRaisesRegex(PlayRefused, "must be 1"):
+                    record_intent_play(db, aid, "viewer-a", 2, 2)
+                first = record_intent_play(db, aid, "viewer-a", 1, 2)
+                self.assertEqual(first["plays_used"], 1)
+                # A lost reply re-sends the same number: replayed, not counted twice.
+                self.assertEqual(record_intent_play(db, aid, "viewer-a", 1, 2),
+                                 {**first, "replayed": True})
+                record_intent_play(db, aid, "viewer-a", 2, 2)
+                with self.assertRaisesRegex(PlayRefused, "limit of 2"):
+                    record_intent_play(db, aid, "viewer-a", 3, 2)
+                with self.assertRaisesRegex(ValueError, "not found for rater"):
+                    record_intent_play(db, aid, "viewer-b", 3, 2)
+                self.assertEqual(intent_plays_used(db, aid), 2)
+                # The response must report the recorded count, not a browser counter.
+                for claimed in (1, 0):
+                    with self.subTest(claimed=claimed), self.assertRaisesRegex(ValueError, "2 plays recorded"):
+                        save_intent_response(db, aid, "viewer-a", normalize_intent_response(
+                            intent_response(play_count=claimed)), 2)
+                save_intent_response(db, aid, "viewer-a", normalize_intent_response(
+                    intent_response(play_count=2)), 2)
+                with self.assertRaisesRegex(PlayRefused, "already completed"):
+                    record_intent_play(db, aid, "viewer-a", 3, 5)
 
     def test_intent_assignments_have_no_repeat_exposures(self):
         with scratch() as directory:
@@ -299,6 +334,7 @@ class IntentStoreTests(unittest.TestCase):
                 self.assertIsNone(study_conflict(db, "annotation"))
             with database(intent_db) as db:
                 assignment = next_assignment(db, "viewer-a", repeats=False)
+                record_intent_play(db, assignment["assignment_id"], "viewer-a", 1, 2)
                 save_intent_response(
                     db, assignment["assignment_id"], "viewer-a",
                     normalize_intent_response(intent_response()), 2,
@@ -339,6 +375,9 @@ class IntentApiTests(unittest.TestCase):
         except urllib.error.HTTPError as error:
             return error.code, json.load(error)
 
+    def play(self, base, assignment_id, rater, number):
+        return self.post(f"{base}/api/intent-plays/{assignment_id}?rater={rater}", {"play_number": number})
+
     def next(self, base, rater):
         with urllib.request.urlopen(f"{base}/api/next?rater={rater}") as response:
             raw = response.read().decode()
@@ -358,6 +397,7 @@ class IntentApiTests(unittest.TestCase):
                 self.assertNotIn(digest, raw)
         self.assertEqual(body["study"], "intent")
         self.assertEqual(body["play_limit"], 2)
+        self.assertEqual(body["plays_used"], 0)
         self.assertEqual(body["progress"], {"completed": 0, "total": 4})
         self.assertEqual(set(body["assignment"]), {
             "assignment_id", "sequence", "started_at", "mime_type", "modality",
@@ -373,6 +413,7 @@ class IntentApiTests(unittest.TestCase):
         assignment_id = self.next(base, "viewer-a")[1]["assignment"]["assignment_id"]
         url = f"{base}/api/intent-responses/{assignment_id}?rater=viewer-a"
         payload = intent_response()
+        self.assertEqual(self.play(base, assignment_id, "viewer-a", 1)[0], 201)
 
         status, created = self.post(url, payload)
         self.assertEqual(status, 201)
@@ -436,11 +477,52 @@ class IntentApiTests(unittest.TestCase):
         raw, body = self.next(base, "annotator-a")
         self.assertEqual(body["study"], "annotation")
         self.assertIsNone(body["play_limit"])
+        self.assertIsNone(body["plays_used"])
         assignment_id = body["assignment"]["assignment_id"]
         status, _ = self.post(
             f"{base}/api/intent-responses/{assignment_id}?rater=annotator-a", intent_response(),
         )
         self.assertEqual(status, 404)
+        self.assertEqual(self.play(base, assignment_id, "annotator-a", 1)[0], 404)
+
+    def test_reload_restores_exposure_and_the_response_reports_every_play(self):
+        # Reviewer repro: exhaust both plays, reload / re-enter as the same
+        # rater, try a third play, then save. The count must survive re-entry.
+        directory = self.enterContext(scratch())
+        db_path = ingest_synthetic(Path(directory))
+        base = self.serve(db_path)
+        assignment_id = self.next(base, "viewer-a")[1]["assignment"]["assignment_id"]
+        status, first = self.play(base, assignment_id, "viewer-a", 1)
+        self.assertEqual((status, first["plays_used"]), (201, 1))
+        self.assertEqual(self.play(base, assignment_id, "viewer-a", 2)[0], 201)
+        self.assertEqual(self.play(base, assignment_id, "viewer-a", 2)[0], 200)
+
+        body = self.next(base, "viewer-a")[1]
+        self.assertEqual(body["assignment"]["assignment_id"], assignment_id)
+        self.assertEqual(body["plays_used"], 2)
+        status, refused = self.play(base, assignment_id, "viewer-a", 3)
+        self.assertEqual(status, 409)
+        self.assertEqual(refused["plays_used"], 2)
+        self.assertIn("limit", refused["error"])
+        self.assertNotIn("collection_closed", refused)
+        for bad in ({"play_number": 0}, {"play_number": "3"}, {"play_number": 1, "x": 1}, {}):
+            with self.subTest(bad=bad):
+                self.assertEqual(self.post(
+                    f"{base}/api/intent-plays/{assignment_id}?rater=viewer-a", bad)[0], 400)
+        # Another rater can neither play nor learn this assignment's count.
+        status, other = self.play(base, assignment_id, "viewer-b", 3)
+        self.assertEqual(status, 400)
+        self.assertNotIn("plays_used", other)
+
+        url = f"{base}/api/intent-responses/{assignment_id}?rater=viewer-a"
+        status, error = self.post(url, intent_response(play_count=1))
+        self.assertEqual(status, 400)
+        self.assertIn("2 plays recorded", error["error"])
+        self.assertEqual(self.post(url, intent_response(play_count=2))[0], 201)
+        with database(db_path) as db:
+            saved = db.execute("SELECT play_count FROM intent_responses").fetchone()[0]
+            plays = db.execute("SELECT COUNT(*) FROM intent_plays").fetchone()[0]
+        self.assertEqual((saved, plays), (2, 2))
 
     def test_freeze_exports_deterministic_bytes_and_closes_collection(self):
         directory = self.enterContext(scratch())
@@ -454,6 +536,7 @@ class IntentApiTests(unittest.TestCase):
         base = self.serve(db_path)
         first = self.next(base, "viewer-a")[1]["assignment"]["assignment_id"]
         first_url = f"{base}/api/intent-responses/{first}?rater=viewer-a"
+        self.assertEqual(self.play(base, first, "viewer-a", 1)[0], 201)
         self.assertEqual(self.post(first_url, intent_response())[0], 201)
 
         printed = io.StringIO()
@@ -481,6 +564,9 @@ class IntentApiTests(unittest.TestCase):
         # After the freeze, new responses are refused but an exact retry
         # of an already-saved response still gets its original receipt.
         second = self.next(base, "viewer-a")[1]["assignment"]["assignment_id"]
+        status, refused = self.play(base, second, "viewer-a", 1)
+        self.assertEqual(status, 409)
+        self.assertEqual((refused["collection_closed"], refused["plays_used"]), (True, 0))
         status, error = self.post(f"{base}/api/intent-responses/{second}?rater=viewer-a", intent_response())
         self.assertEqual(status, 409)
         self.assertIn("frozen", error["error"])

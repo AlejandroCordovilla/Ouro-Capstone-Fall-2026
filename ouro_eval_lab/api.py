@@ -10,12 +10,12 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from .contracts import (
-    ContractError, looks_like_phone_number, normalize_intent_response,
+    INTENT_MAX_PLAY_COUNT, ContractError, looks_like_phone_number, normalize_intent_response,
     validate_annotation_payload, validate_intent_response_payload,
 )
 from .store import (
-    CollectionFrozen, connect, next_assignment, progress, save_annotation,
-    save_intent_response, saved_intent_receipt,
+    CollectionFrozen, PlayRefused, connect, intent_plays_used, next_assignment, progress,
+    record_intent_play, save_annotation, save_intent_response, saved_intent_receipt,
 )
 
 
@@ -118,9 +118,13 @@ class LabHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/next":
                 rater = self._rater(query)
                 repeats = self.study != "intent"
+                plays_used = None
                 with connect(self.db_path) as db:
                     assignment = next_assignment(db, rater, repeats=repeats)
                     state = progress(db, rater, repeats=repeats)
+                    if assignment and self.study == "intent":
+                        # Restored on every reload, so re-entry never resets exposure.
+                        plays_used = intent_plays_used(db, assignment["assignment_id"])
                 if assignment:
                     # Source IDs can encode the answer (for example CLEAN).
                     # Only send presentation fields; preserve canonical identity
@@ -133,7 +137,7 @@ class LabHandler(BaseHTTPRequestHandler):
                 # The study mode is a server setting, never an artifact field.
                 return self._json(200, {
                     "assignment": assignment, "progress": state,
-                    "study": self.study, "play_limit": self.play_limit,
+                    "study": self.study, "play_limit": self.play_limit, "plays_used": plays_used,
                 })
             if parsed.path.startswith("/api/media/"):
                 assignment_id = parsed.path.rsplit("/", 1)[-1]
@@ -189,6 +193,8 @@ class LabHandler(BaseHTTPRequestHandler):
         # assignment through the other study's form.
         if self.study == "intent" and parsed.path.startswith("/api/intent-responses/"):
             return self._post_intent_response(parsed.path, query)
+        if self.study == "intent" and parsed.path.startswith("/api/intent-plays/"):
+            return self._post_intent_play(parsed.path, query)
         if self.study == "annotation" and parsed.path.startswith("/api/annotations/"):
             return self._post_annotation(parsed.path, query)
         return self._json(404, {"error": "not found"})
@@ -231,6 +237,39 @@ class LabHandler(BaseHTTPRequestHandler):
             conflict="assignment already completed with a different response",
             retry_hint="retry the exact same response",
         )
+
+    def _post_intent_play(self, path: str, query: dict[str, list[str]]) -> None:
+        """Record one play start before the clip plays.
+
+        201 records a new play, 200 replays an already-recorded play_number,
+        409 refuses (limit reached, completed, out of order, or frozen) with the
+        durable count, 400 rejects before writing, and 503 has an unknown outcome.
+        """
+        try:
+            rater = self._rater(query)
+            payload = self._read_payload(256)
+            if set(payload) != {"play_number"}:
+                raise ContractError("play request must contain exactly play_number")
+            play_number = payload["play_number"]
+            if type(play_number) is not int or not 1 <= play_number <= INTENT_MAX_PLAY_COUNT:
+                raise ContractError(f"play_number must be an integer from 1 to {INTENT_MAX_PLAY_COUNT}")
+            assignment_id = path.rsplit("/", 1)[-1]
+            with connect(self.db_path) as db:
+                db.execute("BEGIN IMMEDIATE")
+                try:
+                    result = record_intent_play(db, assignment_id, rater, play_number, self.play_limit)
+                except (PlayRefused, CollectionFrozen) as exc:
+                    refusal = {"error": str(exc), "plays_used": intent_plays_used(db, assignment_id)}
+                    if isinstance(exc, CollectionFrozen):
+                        refusal["collection_closed"] = True
+                    return self._json(HTTPStatus.CONFLICT, refusal)
+            return self._json(HTTPStatus.OK if result.get("replayed") else HTTPStatus.CREATED, result)
+        except sqlite3.OperationalError:
+            return self._json(HTTPStatus.SERVICE_UNAVAILABLE, {
+                "error": "play status unknown; retry the same play_number"
+            })
+        except (ValueError, ContractError, json.JSONDecodeError) as exc:
+            return self._json(400, {"error": str(exc)})
 
     def _post_with_receipt(self, path, query, prepare, save, saved_receipt, conflict, retry_hint) -> None:
         """Save once per assignment; an exact retry replays the original receipt.

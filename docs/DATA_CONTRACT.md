@@ -132,12 +132,40 @@ This example is fictional and says nothing about the sealed records:
 One database serves one study: the server refuses a database that already holds
 the other study's submissions, or repeat assignments. Intent assignments have no
 hidden repeats, because a repeat is a second exposure. `/api/next` adds the
-top-level server settings `study` and `play_limit`; the assignment object keeps
-the same neutral fields as annotation, with no artifact ID, filename or SHA-256.
+top-level fields `study`, `play_limit` and `plays_used` (the current
+assignment's recorded plays; `null` during annotation). The assignment object
+keeps the same neutral fields as annotation, with no artifact ID, filename or
+SHA-256.
 
 The viewer sees only the clip. It plays only through a counted Play button, from
-the start, up to the play limit (default 2, the pre-registered value). The
-viewer then submits to `POST /api/intent-responses/<assignment_id>?rater=`:
+the start, up to the play limit (default 2, the pre-registered value).
+
+#### Play starts
+
+The server, not the browser, holds the exposure count. Before each play the
+browser sends `POST /api/intent-plays/<assignment_id>?rater=` with exactly
+`{"play_number": n}`, where `n` is the next play (recorded plays + 1). The clip
+plays only after the server acknowledges it.
+
+- `201` records the play and returns `play_id`, `play_number` and `plays_used`.
+- `200` with `replayed: true` answers a `play_number` that is already recorded,
+  so a request whose reply was lost never counts twice.
+- `409` refuses a play beyond the limit, on a completed assignment, out of
+  order, or after the freeze. The body carries `error` and the durable
+  `plays_used`; a freeze also sets `collection_closed: true`.
+- `400` rejects a malformed request or another rater's assignment before any
+  write, and `503` means the outcome is unknown (retry the same `play_number`).
+
+Play starts are stored in the append-only `intent_plays` table, one row per
+start, unique per assignment and play number. Because `/api/next` restores
+`plays_used`, reloading or signing in again never grants fresh plays. A play
+that was recorded but failed to start in the browser stays counted; the next
+press retries it without a new count. The count is of plays started through the
+lab UI; the media URL itself is not gated per play.
+
+#### Response
+
+The viewer then submits to `POST /api/intent-responses/<assignment_id>?rater=`:
 
 ```json
 {
@@ -156,7 +184,9 @@ viewer then submits to `POST /api/intent-responses/<assignment_id>?rater=`:
   recall and null certainty; otherwise both are required.
 - `other_beats` is optional, at most 500 characters.
 - `play_count` is an integer from 0 to 20 and may not exceed the server's play
-  limit.
+  limit. It must equal the plays recorded in `intent_plays` for the assignment;
+  any other value is a `400` rejection, so the stored and exported count is the
+  durable one.
 - Emails and phone numbers are rejected in all viewer text.
 - Text is trimmed before storage. An exact retry is compared after trimming.
 

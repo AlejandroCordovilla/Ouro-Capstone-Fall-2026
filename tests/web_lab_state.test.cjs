@@ -602,9 +602,19 @@ test('a phone number is refused as a rater ID before any request', async () => {
 const INTENT_FIELDS = ['audience', 'problem', 'product', 'key_benefit', 'support', 'call_to_action', 'tone'];
 const clip = id => ({...item(id), modality: 'video', mime_type: 'video/mp4'});
 
-function intentNext(assignment, completed = 0) {
-  return {ok: true, body: {assignment, progress: {completed, total: 4}, study: 'intent', play_limit: 2}};
+function intentNext(assignment, completed = 0, playsUsed = 0) {
+  return {ok: true, body: {
+    assignment, progress: {completed, total: 4}, study: 'intent', play_limit: 2,
+    plays_used: assignment ? playsUsed : null,
+  }};
 }
+
+// The server's receipt for a recorded play start.
+const played = (n, replayed = false) => ({ok: true, status: replayed ? 200 : 201, body: {
+  play_id: `play-${n}`, play_number: n, plays_used: n, ...(replayed ? {replayed: true} : {}),
+}});
+const responsePosts = lab => lab.requests.filter(request => request.url.startsWith('/api/intent-responses/'));
+const playPosts = lab => lab.requests.filter(request => request.url.startsWith('/api/intent-plays/'));
 
 function fillIntent(lab, overrides = {}) {
   const fields = {other_beats: ''};
@@ -626,6 +636,7 @@ async function watch(lab) {
 test('intent study plays a limited clip and posts recall to its own endpoint', async () => {
   const lab = harness([
     intentNext(clip('a')),
+    played(1), played(2),
     {ok: true, body: {response_id: 'response-a', completed_at: 'synthetic'}},
     intentNext(null, 1),
   ]);
@@ -640,7 +651,7 @@ test('intent study plays a limited clip and posts recall to its own endpoint', a
 
   fillIntent(lab);
   await lab.submit();
-  assert.equal(lab.requests.filter(request => request.method === 'POST').length, 0);
+  assert.equal(responsePosts(lab).length, 0);
   assert.match(lab.element('error').textContent, /Play the clip/);
   assert.equal(lab.element('submit').disabled, false);
 
@@ -653,9 +664,13 @@ test('intent study plays a limited clip and posts recall to its own endpoint', a
   assert.equal(lab.element('plays-left').textContent, '0 of 2 plays left');
   await lab.element('play-clip').listeners.click();
   assert.equal(video.played, 2);
+  assert.deepEqual(playPosts(lab).map(request => [request.url, JSON.parse(request.body)]), [
+    ['/api/intent-plays/a?rater=rater-a', {play_number: 1}],
+    ['/api/intent-plays/a?rater=rater-a', {play_number: 2}],
+  ]);
 
   await lab.submit();
-  const saves = lab.requests.filter(request => request.method === 'POST');
+  const saves = responsePosts(lab);
   assert.equal(saves.length, 1);
   assert.equal(saves[0].url, '/api/intent-responses/a?rater=rater-a');
   const body = JSON.parse(saves[0].body);
@@ -668,7 +683,7 @@ test('intent study plays a limited clip and posts recall to its own endpoint', a
 });
 
 test('incomplete or contradictory intent answers stay local and send nothing', async () => {
-  const lab = harness([intentNext(clip('a'))]);
+  const lab = harness([intentNext(clip('a')), played(1)]);
   await lab.signIn();
   await watch(lab);
   for (const [overrides, message] of [
@@ -681,19 +696,19 @@ test('incomplete or contradictory intent answers stay local and send nothing', a
     assert.match(lab.element('error').textContent, message);
     assert.equal(lab.element('submit').disabled, false);
   }
-  assert.equal(lab.requests.filter(request => request.method === 'POST').length, 0);
+  assert.equal(responsePosts(lab).length, 0);
   assert.equal(lab.storage.entries.has('ouro-eval-lab-pending-save-v1'), false);
 });
 
 test('interrupted intent save recovers in intent mode with the same bytes', async () => {
   const storage = {entries: new Map()};
-  const beforeReload = harness([intentNext(clip('a')), new Promise(() => {})], [], storage);
+  const beforeReload = harness([intentNext(clip('a')), played(1), new Promise(() => {})], [], storage);
   await beforeReload.signIn();
   await watch(beforeReload);
   fillIntent(beforeReload);
   const original = beforeReload.submit();
   await flushAsync();
-  const originalRequest = beforeReload.requests.find(request => request.method === 'POST');
+  const [originalRequest] = responsePosts(beforeReload);
   beforeReload.expireTimeouts();
   await original;
 
@@ -705,7 +720,7 @@ test('interrupted intent save recovers in intent mode with the same bytes', asyn
   assert.equal(afterReload.requests.length, 0);
   assert.equal(afterReload.element('intent-fields').classList.contains('hidden'), false);
   await afterReload.retrySave();
-  const replay = afterReload.requests.find(request => request.method === 'POST');
+  const [replay] = responsePosts(afterReload);
   assert.equal(replay.url, originalRequest.url);
   assert.equal(replay.body, originalRequest.body);
   assert.equal(afterReload.assignment().assignment_id, 'b');
@@ -713,7 +728,7 @@ test('interrupted intent save recovers in intent mode with the same bytes', asyn
 });
 
 test('an annotation receipt never confirms an intent save', async () => {
-  const lab = harness([intentNext(clip('a')), {ok: true, body: {annotation_id: 'wrong-kind'}}]);
+  const lab = harness([intentNext(clip('a')), played(1), {ok: true, body: {annotation_id: 'wrong-kind'}}]);
   await lab.signIn();
   await watch(lab);
   fillIntent(lab);
@@ -721,4 +736,87 @@ test('an annotation receipt never confirms an intent save', async () => {
   assert.equal(lab.assignment().assignment_id, 'a');
   assert.match(lab.element('error').textContent, /Save status is unknown/);
   assert.equal(lab.element('retry-save').classList.contains('hidden'), false);
+});
+
+test('reload restores the durable play count instead of granting fresh plays', async () => {
+  // Reviewer repro: exhaust both plays, reload, sign in again as the same rater.
+  const before = harness([intentNext(clip('a')), played(1), played(2)]);
+  await before.signIn();
+  await watch(before);
+  await watch(before);
+  assert.equal(before.element('plays-left').textContent, '0 of 2 plays left');
+
+  const after = harness([
+    intentNext(clip('a'), 0, 2),
+    {ok: true, body: {response_id: 'response-a'}},
+    intentNext(null, 1),
+  ]);
+  await after.signIn();
+  const video = after.element('media').children[0];
+  assert.equal(after.element('plays-left').textContent, '0 of 2 plays left');
+  assert.equal(after.element('play-clip').disabled, true);
+  assert.equal(after.element('play-clip').textContent, 'Play again');
+  await after.element('play-clip').listeners.click();
+  assert.equal(video.played, undefined);
+  assert.equal(playPosts(after).length, 0);
+
+  // The saved response reports every play that started, across both page loads.
+  fillIntent(after);
+  await after.submit();
+  assert.equal(JSON.parse(responsePosts(after)[0].body).play_count, 2);
+});
+
+test('a partly used clip resumes at the next server play number', async () => {
+  const lab = harness([intentNext(clip('a'), 0, 1), played(2)]);
+  await lab.signIn();
+  assert.equal(lab.element('plays-left').textContent, '1 of 2 plays left');
+  await watch(lab);
+  assert.deepEqual(JSON.parse(playPosts(lab)[0].body), {play_number: 2});
+  assert.equal(lab.element('plays-left').textContent, '0 of 2 plays left');
+});
+
+test('a lost play receipt never plays unrecorded and retries the same play number', async () => {
+  const lab = harness([intentNext(clip('a')), new Error('network unavailable'), played(1, true)]);
+  await lab.signIn();
+  const video = lab.element('media').children[0];
+  await lab.element('play-clip').listeners.click();
+  assert.equal(video.played, undefined);
+  assert.match(lab.element('error').textContent, /could not be recorded/);
+  assert.equal(lab.element('play-clip').disabled, false);
+  assert.equal(lab.element('plays-left').textContent, '2 of 2 plays left');
+
+  await lab.element('play-clip').listeners.click();
+  assert.equal(video.played, 1);
+  assert.deepEqual(playPosts(lab).map(request => JSON.parse(request.body).play_number), [1, 1]);
+  assert.equal(lab.element('plays-left').textContent, '1 of 2 plays left');
+});
+
+test('a server play refusal adopts the durable count and does not play', async () => {
+  const lab = harness([
+    intentNext(clip('a')),
+    {ok: false, status: 409, body: {error: 'play limit of 2 reached', plays_used: 2}},
+  ]);
+  await lab.signIn();
+  const video = lab.element('media').children[0];
+  await lab.element('play-clip').listeners.click();
+  assert.equal(video.played, undefined);
+  assert.match(lab.element('error').textContent, /play limit of 2 reached/);
+  assert.equal(lab.element('plays-left').textContent, '0 of 2 plays left');
+  assert.equal(lab.element('play-clip').disabled, true);
+});
+
+test('a counted play that fails to start retries without a second count', async () => {
+  const lab = harness([intentNext(clip('a')), played(1)]);
+  await lab.signIn();
+  const video = lab.element('media').children[0];
+  const play = video.play;
+  video.play = () => Promise.reject(new Error('autoplay blocked'));
+  await lab.element('play-clip').listeners.click();
+  assert.match(lab.element('error').textContent, /could not start/);
+  assert.equal(lab.element('play-clip').disabled, false);
+  video.play = play;
+  await lab.element('play-clip').listeners.click();
+  assert.equal(video.played, 1);
+  assert.equal(playPosts(lab).length, 1);
+  assert.equal(lab.element('plays-left').textContent, '1 of 2 plays left');
 });

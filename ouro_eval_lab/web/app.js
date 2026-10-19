@@ -1,6 +1,7 @@
 const state = {
   rater: null, assignment: null, loadEpoch: 0, pendingSave: null, saveBusy: false,
-  study: 'annotation', playLimit: null, clip: null, plays: 0, playing: false,
+  study: 'annotation', playLimit: null, clip: null, clipAssignmentId: null,
+  plays: 0, playing: false, unstartedPlay: false,
 };
 const $ = id => document.getElementById(id);
 const REQUEST_DEADLINE_MS = 12000;
@@ -96,8 +97,10 @@ function clearAssignment() {
   $('artifact-id').textContent = '';
   $('media').replaceChildren();
   state.clip = null;
+  state.clipAssignmentId = null;
   state.plays = 0;
   state.playing = false;
+  state.unstartedPlay = false;
   $('play-row').classList.add('hidden');
   updatePlayControls();
 }
@@ -159,7 +162,7 @@ function intentBody(form) {
 
 function updatePlayControls() {
   const left = state.playLimit === null ? null : Math.max(state.playLimit - state.plays, 0);
-  $('play-clip').disabled = !state.clip || state.playing || left === 0;
+  $('play-clip').disabled = !state.clip || state.playing || (left === 0 && !state.unstartedPlay);
   $('play-clip').textContent = state.plays ? 'Play again' : 'Play clip';
   $('plays-left').textContent = !state.clip ? ''
     : left === null ? `Played ${state.plays} times` : `${left} of ${state.playLimit} plays left`;
@@ -167,10 +170,14 @@ function updatePlayControls() {
 
 // Intent clips play only through this button, from the start, so every
 // viewer gets the same counted exposure. There is no scrubbing or pausing.
-function prepareClip(video) {
+// The server holds the count: it is restored on reload and recorded before
+// each play, so re-entering an assignment never grants fresh plays.
+function prepareClip(video, assignmentId, playsUsed) {
   state.clip = video;
-  state.plays = 0;
+  state.clipAssignmentId = assignmentId;
+  state.plays = playsUsed;
   state.playing = false;
+  state.unstartedPlay = false;
   video.addEventListener('ended', () => {
     if (state.clip !== video) return;
     state.playing = false;
@@ -181,20 +188,60 @@ function prepareClip(video) {
   updatePlayControls();
 }
 
+async function recordPlay(clip) {
+  const url = `/api/intent-plays/${state.clipAssignmentId}?rater=${encodeURIComponent(state.rater)}`;
+  let reply;
+  try {
+    reply = await withDeadline(async signal => {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        // Re-sending the same number after a lost reply replays, never double-counts.
+        body: JSON.stringify({play_number: state.plays + 1}),
+        signal,
+      });
+      return {response, body: await response.json()};
+    }, 'Timed out recording the play');
+  } catch (error) {
+    if (state.clip === clip) $('error').textContent = `The play could not be recorded (${error.message || 'connection error'}); try again.`;
+    return false;
+  }
+  if (state.clip !== clip) return false;
+  const {response, body} = reply;
+  if (Number.isInteger(body?.plays_used)) state.plays = body.plays_used;
+  if (!response.ok || !Number.isInteger(body?.plays_used)) {
+    $('error').textContent = body?.error || 'The play could not be recorded; try again.';
+    return false;
+  }
+  return true;
+}
+
 async function playClip() {
   const clip = state.clip;
-  if (!clip || state.playing || (state.playLimit !== null && state.plays >= state.playLimit)) return;
+  if (!clip || state.playing) return;
+  if (!state.unstartedPlay && state.playLimit !== null && state.plays >= state.playLimit) return;
   state.playing = true;
+  $('error').textContent = '';
   updatePlayControls();
+  // Record the start first: the viewer never sees an exposure the server did not count.
+  if (!state.unstartedPlay && !await recordPlay(clip)) {
+    if (state.clip !== clip) return;
+    state.playing = false;
+    updatePlayControls();
+    return;
+  }
+  if (state.clip !== clip) return;
+  state.unstartedPlay = true;
   try {
     clip.currentTime = 0;
     await clip.play();
     if (state.clip !== clip) return;
-    state.plays++;
+    state.unstartedPlay = false;
   } catch {
     if (state.clip !== clip) return;
     state.playing = false;
-    $('error').textContent = 'The clip could not start; try again.';
+    // The play is already counted, so the next press retries it without a new count.
+    $('error').textContent = 'The clip could not start; press Play to try again.';
   }
   updatePlayControls();
 }
@@ -362,7 +409,7 @@ async function loadNext() {
       $('done').classList.remove('hidden');
       return;
     }
-    await renderMedia(body.assignment);
+    await renderMedia(body.assignment, Number.isInteger(body.plays_used) ? body.plays_used : 0);
     if (state.loadEpoch !== loadEpoch) throw new Error('Assignment media load was interrupted');
     $('modality').textContent = body.assignment.modality;
     $('artifact-id').textContent = body.assignment.review_label || 'Review item';
@@ -430,7 +477,7 @@ async function waitForPlayableMedia(element, item, readyEvent) {
   }), 'Timed out loading assignment media');
 }
 
-async function renderMedia(item) {
+async function renderMedia(item, playsUsed = 0) {
   const media = $('media');
   media.replaceChildren();
   if (item.mime_type.startsWith('image/')) {
@@ -449,7 +496,7 @@ async function renderMedia(item) {
     video.preload = intent ? 'auto' : 'metadata';
     video.setAttribute('aria-label', 'Synthetic video artifact to annotate');
     await waitForPlayableMedia(video, item, 'loadedmetadata');
-    if (intent) prepareClip(video);
+    if (intent) prepareClip(video, item.assignment_id, playsUsed);
   } else {
     const pre = document.createElement('pre');
     pre.textContent = 'Loading synthetic artifact…';

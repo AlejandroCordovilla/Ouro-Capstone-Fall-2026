@@ -41,6 +41,11 @@ CREATE TABLE IF NOT EXISTS intent_responses (
   play_limit INTEGER, started_at TEXT NOT NULL, completed_at TEXT NOT NULL,
   FOREIGN KEY(assignment_id) REFERENCES assignments(assignment_id)
 );
+CREATE TABLE IF NOT EXISTS intent_plays (
+  play_id TEXT PRIMARY KEY, assignment_id TEXT NOT NULL, rater_id TEXT NOT NULL,
+  play_number INTEGER NOT NULL, started_at TEXT NOT NULL, UNIQUE(assignment_id, play_number),
+  FOREIGN KEY(assignment_id) REFERENCES assignments(assignment_id)
+);
 CREATE TABLE IF NOT EXISTS intent_freezes (
   freeze_id TEXT PRIMARY KEY, export_sha256 TEXT NOT NULL, export_format TEXT NOT NULL,
   response_count INTEGER NOT NULL, created_at TEXT NOT NULL
@@ -49,6 +54,10 @@ CREATE TRIGGER IF NOT EXISTS intent_responses_no_update BEFORE UPDATE ON intent_
 BEGIN SELECT RAISE(ABORT, 'intent responses are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS intent_responses_no_delete BEFORE DELETE ON intent_responses
 BEGIN SELECT RAISE(ABORT, 'intent responses are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS intent_plays_no_update BEFORE UPDATE ON intent_plays
+BEGIN SELECT RAISE(ABORT, 'intent plays are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS intent_plays_no_delete BEFORE DELETE ON intent_plays
+BEGIN SELECT RAISE(ABORT, 'intent plays are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS intent_freezes_no_update BEFORE UPDATE ON intent_freezes
 BEGIN SELECT RAISE(ABORT, 'intent freezes are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS intent_freezes_no_delete BEFORE DELETE ON intent_freezes
@@ -60,6 +69,10 @@ STUDIES = ("annotation", "intent")
 
 class CollectionFrozen(Exception):
     """Intent responses were already exported for reveal; collection is closed."""
+
+
+class PlayRefused(Exception):
+    """A play start the server will not record: limit reached, completed, or out of order."""
 
 
 def connect(path: Path | str) -> sqlite3.Connection:
@@ -205,6 +218,53 @@ def intent_collection_frozen(db: sqlite3.Connection) -> bool:
     return db.execute("SELECT 1 FROM intent_freezes LIMIT 1").fetchone() is not None
 
 
+def intent_plays_used(db: sqlite3.Connection, assignment_id: str) -> int:
+    return db.execute(
+        "SELECT COUNT(*) FROM intent_plays WHERE assignment_id = ?", (assignment_id,),
+    ).fetchone()[0]
+
+
+def record_intent_play(
+    db: sqlite3.Connection, assignment_id: str, rater_id: str, play_number: int,
+    play_limit: int | None,
+) -> dict:
+    """Append one play start before the browser plays the clip.
+
+    The durable count is the exposure record: a reload or re-entry restores it,
+    and a response must report it exactly. Re-sending a recorded play_number
+    replays its receipt, so an interrupted request never counts twice.
+    """
+    assignment = db.execute(
+        "SELECT * FROM assignments WHERE assignment_id = ? AND rater_id = ?",
+        (assignment_id, rater_id),
+    ).fetchone()
+    if not assignment:
+        raise ValueError("assignment not found for rater")
+    saved = db.execute(
+        "SELECT play_id, started_at FROM intent_plays WHERE assignment_id = ? AND play_number = ?",
+        (assignment_id, play_number),
+    ).fetchone()
+    used = intent_plays_used(db, assignment_id)
+    if saved:
+        return {"play_id": saved["play_id"], "play_number": play_number,
+                "plays_used": used, "replayed": True}
+    if intent_collection_frozen(db):
+        raise CollectionFrozen("intent responses are frozen for reveal; collection is closed")
+    if assignment["completed_at"]:
+        raise PlayRefused("assignment already completed")
+    if play_limit is not None and used >= play_limit:
+        raise PlayRefused(f"play limit of {play_limit} reached")
+    if play_number != used + 1:
+        raise PlayRefused(f"play_number must be {used + 1}, the next play")
+    play_id = secrets.token_urlsafe(12)
+    db.execute(
+        "INSERT INTO intent_plays (play_id, assignment_id, rater_id, play_number, started_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (play_id, assignment_id, rater_id, play_number, datetime.now(timezone.utc).isoformat()),
+    )
+    return {"play_id": play_id, "play_number": play_number, "plays_used": play_number}
+
+
 def save_intent_response(
     db: sqlite3.Connection, assignment_id: str, rater_id: str, normalized: dict,
     play_limit: int | None,
@@ -220,6 +280,9 @@ def save_intent_response(
         raise ValueError("assignment already completed")
     if intent_collection_frozen(db):
         raise CollectionFrozen("intent responses are frozen for reveal; collection is closed")
+    used = intent_plays_used(db, assignment_id)
+    if normalized["play_count"] != used:
+        raise ValueError(f"play_count must equal the {used} plays recorded for this assignment")
     completed_at = datetime.now(timezone.utc).isoformat()
     response_id = secrets.token_urlsafe(12)
     db.execute(
