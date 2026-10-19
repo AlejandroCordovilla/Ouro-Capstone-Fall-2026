@@ -63,40 +63,68 @@ Two separately versioned contracts serve the intent study. Neither changes
 annotation contract `2.1.0`, the evaluator-output contract `1.0.0`, or any
 stored PASS/HOLD judgment.
 
-### Intent record `1.0.0` (provisional)
+### Intent record `2.0.0`
 
 A revealed, sponsor-sanitized intent record describes what one clip was meant
-to communicate. The schema follows the field list in
-`data/public_intent/README.md` and is **provisional until the sponsor confirms
-the sealed record format**; a confirmed difference is a contract change.
+to communicate. Version `2.0.0` validates the envelope the sealed records were
+committed in: the seven component strings nest under `intended` and their
+delivery codes under `delivery`. The repository owner checked this structure
+against the four preserved records and their commitments in the PR #23 review
+(key names and nesting only; no content was disclosed).
+It replaces the provisional `1.0.0` shape of seven top-level `{text, delivery}`
+objects, which never matched the committed files. The originals and their
+commitments are never rewritten.
+
+This example is fictional and says nothing about the sealed records:
 
 ```json
 {
+  "schema": "fictional-intent-record",
+  "record_type": "fictional_intent_record",
   "artifact_id": "syn-intent-01",
   "relative_path": "clip01.mp4",
   "salt": "random salt",
-  "audience": {"text": "...", "delivery": "explicit_text"},
-  "problem": {"text": "...", "delivery": "implied"},
-  "product": {"text": "...", "delivery": "explicit_text"},
-  "key_benefit": {"text": "...", "delivery": "partially_delivered"},
-  "support": {"text": "...", "delivery": "visual_only"},
-  "call_to_action": {"text": "...", "delivery": "omitted_in_edit"},
-  "tone": {"text": "", "delivery": "not_intended"},
-  "required_beats": [{"text": "...", "delivery": "visual_only"}]
+  "fictional": true,
+  "frozen_at": "2026-01-01T00:00:00Z",
+  "note": "free text",
+  "delivery_codes": ["explicit_text", "implied", "not_intended", "omitted_in_edit",
+                     "partially_delivered", "visual_only"],
+  "intended": {
+    "audience": "...", "problem": "...", "product": "...", "key_benefit": "...",
+    "support": "...", "call_to_action": "...", "tone": ""
+  },
+  "delivery": {
+    "audience": "explicit_text", "problem": "implied", "product": "explicit_text",
+    "key_benefit": "partially_delivered", "support": "visual_only",
+    "call_to_action": "omitted_in_edit", "tone": "not_intended"
+  }
 }
 ```
 
-- `delivery` is one of `explicit_text`, `implied`, `visual_only`,
-  `partially_delivered`, `omitted_in_edit`, `not_intended`.
-- `text` is at most 300 characters. It may be empty only when `delivery` is
-  `not_intended`; `omitted_in_edit` was intended, so its text is required.
-- `required_beats` is optional, at most 10 beats, and cannot be `not_intended`.
-- Unknown keys are rejected, not dropped: an unexpected key may be a private
-  field (prompt, campaign, customer). URLs, emails and phone numbers are rejected
-  in record text.
+- All eleven top-level keys are required. Unknown keys are rejected, not
+  dropped: an unexpected key may be a private field (prompt, campaign,
+  customer). There is no `offer` or `required_beats`.
+- `intended` and `delivery` each hold exactly the seven fields `audience`,
+  `problem`, `product`, `key_benefit`, `support`, `call_to_action`, `tone`.
+  These are the pilot's coding units. Mappings to thesis/hook/proof/offer/CTA
+  are derived interpretations, not part of the record.
+- `delivery_codes` is a nonempty list of unique codes from `explicit_text`,
+  `implied`, `visual_only`, `partially_delivered`, `omitted_in_edit`,
+  `not_intended`. Every `delivery` value must be one of the record's codes.
+- Each `intended` string is at most 300 characters. It may be empty only when
+  its delivery is `not_intended`; `omitted_in_edit` was intended, so its text
+  is required.
+- `fictional` must be `true`. `frozen_at` is an ISO-8601 timestamp with a
+  timezone. `schema` and `record_type` are nonempty strings of at most 80
+  characters; `note` is at most 500. URLs, emails and phone numbers are
+  rejected in every text value.
+- Validation errors name keys, never values, so the custodian can run the
+  check on sealed records and share the output without disclosing intent.
 - `scripts/verify_intent_reveal.py` validates each record only after its bytes
-  match the pre-published commitment. `--skip-schema` checks commitments alone
-  while the schema awaits confirmation.
+  match the pre-published commitment. `--skip-schema` checks commitments alone.
+- `intent_coding_units(record)` derives the per-component coding view
+  (`{field: {text, delivery}}`) from a verified record. The view is never
+  stored over the original.
 
 ### Intent response `1.0.0` (Stage 1 viewer capture)
 

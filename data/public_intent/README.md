@@ -10,7 +10,7 @@ Keep this README and `manifest.json` away from viewers during blinded viewing. V
 - **Withheld by the sponsor until reveal:** the four frozen intent records (`clip01.intent.json` … `clip04.intent.json`). They were written and hashed before this repository saw the clips. Each record contains a random salt, so the commitment cannot be guessed from its contents.
 - The manifest's `defect_present: false` only means no production defect was seeded. It says nothing about whether the intent comes through. That is the question Team C measures.
 
-Each record uses the same bounded fields: `audience`, `problem`, `product`, `key_benefit`, `support`, `call_to_action` and `tone`. Each field also has a sponsor-coded `delivery` value, one of `explicit_text`, `implied`, `visual_only`, `partially_delivered`, `omitted_in_edit` or `not_intended`. The clips differ on purpose in how much of the intent they deliver. Which clip does what stays sealed until reveal.
+Each record uses the same bounded fields: `audience`, `problem`, `product`, `key_benefit`, `support`, `call_to_action` and `tone`, nested under `intended`. Each field also has a sponsor-coded value under `delivery`, one of `explicit_text`, `implied`, `visual_only`, `partially_delivered`, `omitted_in_edit` or `not_intended`. The clips differ on purpose in how much of the intent they deliver. Which clip does what stays sealed until reveal.
 
 ## Procedure
 
@@ -26,7 +26,7 @@ Each record uses the same bounded fields: `audience`, `problem`, `product`, `key
    ```sh
    python3 scripts/verify_intent_reveal.py --records /path/to/revealed/records
    ```
-   Any mismatch invalidates the reveal. The script also checks each matching record against the provisional intent-record contract; use `--skip-schema` to check commitments alone if the sponsor's final record format differs.
+   Any mismatch invalidates the reveal. The script also checks each matching record against the intent-record contract (`docs/DATA_CONTRACT.md`); use `--skip-schema` to check commitments alone.
 5. **Separate coding.** Coders who did not watch as viewers compare each frozen response to the record, field by field, with Team C's codebook. Agreement between coders is reported. Nothing here is an AVC score or a probability.
 
 ## Limits

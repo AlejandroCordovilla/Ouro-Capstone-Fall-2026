@@ -20,8 +20,8 @@ from pathlib import Path
 from ouro_eval_lab.api import LabHandler
 from ouro_eval_lab.cli import main as cli_main
 from ouro_eval_lab.contracts import (
-    INTENT_FIELDS, ContractError, normalize_intent_response, validate_intent_record,
-    validate_intent_response_payload,
+    INTENT_DELIVERY_CODES, INTENT_FIELDS, INTENT_RECORD_KEYS, ContractError, intent_coding_units,
+    normalize_intent_response, validate_intent_record, validate_intent_response_payload,
 )
 from ouro_eval_lab.runner import export_intent_responses
 from ouro_eval_lab.store import (
@@ -30,12 +30,25 @@ from ouro_eval_lab.store import (
 )
 
 
-def intent_record(**overrides):
+def intent_record(intended=None, delivery=None, **overrides):
+    """A fictional record in the committed sponsor envelope (nested intended/delivery).
+
+    The structure matches the sealed records; every value here is invented and
+    says nothing about their content.
+    """
     record = {
         "artifact_id": "syn-x", "relative_path": "clipX.mp4", "salt": "9f2c41aa",
-        **{field: {"text": f"Synthetic {field}", "delivery": "explicit_text"} for field in INTENT_FIELDS},
+        "schema": "fictional-intent-record", "record_type": "fictional_intent_record",
+        "fictional": True, "frozen_at": "2026-01-01T00:00:00Z",
+        "note": "Fictional structural fixture for tests; not a sealed study record.",
+        "delivery_codes": sorted(INTENT_DELIVERY_CODES),
+        "intended": {field: f"Fictional {field} for the Glimmerbox lamp" for field in INTENT_FIELDS},
+        "delivery": {field: "explicit_text" for field in INTENT_FIELDS},
     }
-    record["tone"] = {"text": "", "delivery": "not_intended"}
+    record["intended"]["tone"] = ""
+    record["delivery"]["tone"] = "not_intended"
+    record["intended"].update(intended or {})
+    record["delivery"].update(delivery or {})
     record.update(overrides)
     return record
 
@@ -88,27 +101,42 @@ def ingest_synthetic(root: Path, count: int = 4) -> Path:
 
 
 class IntentRecordContractTests(unittest.TestCase):
-    def test_accepts_readme_fields_with_delivery_codes(self):
+    def test_accepts_the_committed_nested_envelope(self):
         validate_intent_record(intent_record())
-        validate_intent_record(intent_record(required_beats=[
-            {"text": "Product shown in use", "delivery": "visual_only"},
-        ]))
+        self.assertEqual(sorted(intent_record()), sorted(INTENT_RECORD_KEYS))
+
+    def test_rejects_the_superseded_top_level_component_shape(self):
+        # Sprint 2's provisional 1.0.0 shape: seven top-level {text, delivery} items.
+        old = {k: v for k, v in intent_record().items() if k not in {"intended", "delivery"}}
+        old.update({field: {"text": "Fictional", "delivery": "implied"} for field in INTENT_FIELDS})
+        with self.assertRaises(ContractError):
+            validate_intent_record(old)
 
     def test_rejects_unknown_missing_oversized_and_uncontrolled_values(self):
+        record = intent_record()
+        del record["intended"]["support"]
         cases = {
             "unknown/private key": intent_record(prompt="internal"),
-            "missing field": {k: v for k, v in intent_record().items() if k != "support"},
-            "bad delivery": intent_record(support={"text": "x", "delivery": "spoken"}),
-            "extra item key": intent_record(support={"text": "x", "delivery": "implied", "notes": ""}),
-            "oversized text": intent_record(support={"text": "x" * 301, "delivery": "implied"}),
-            "delivered but empty": intent_record(support={"text": " ", "delivery": "explicit_text"}),
-            "url in text": intent_record(call_to_action={"text": "Visit https://example.test", "delivery": "explicit_text"}),
-            "email in text": intent_record(audience={"text": "ask a@b.test", "delivery": "implied"}),
+            "missing envelope key": {k: v for k, v in intent_record().items() if k != "note"},
+            "missing component": record,
+            "extra component": intent_record(intended={"offer": "Fictional offer"}),
+            "component object, not string": intent_record(intended={"support": {"text": "x"}}),
+            "bad delivery": intent_record(delivery={"support": "spoken"}),
+            "delivery not in record codes": intent_record(
+                delivery_codes=["explicit_text", "not_intended"], delivery={"support": "implied"}),
+            "uncontrolled delivery_codes": intent_record(delivery_codes=["explicit_text", "spoken"]),
+            "duplicate delivery_codes": intent_record(delivery_codes=["implied", "implied"]),
+            "oversized text": intent_record(intended={"support": "x" * 301}),
+            "delivered but empty": intent_record(intended={"support": " "}),
+            "url in text": intent_record(intended={"call_to_action": "Visit https://example.test"}),
+            "email in text": intent_record(intended={"audience": "ask a@b.test"}),
+            "url in note": intent_record(note="see www.example.test"),
+            "not fictional": intent_record(fictional=False),
+            "naive frozen_at": intent_record(frozen_at="2026-01-01T00:00:00"),
+            "empty schema": intent_record(schema=""),
             "path with folder": intent_record(relative_path="../clipX.mp4"),
             "bad artifact id": intent_record(artifact_id="syn x"),
             "empty salt": intent_record(salt=""),
-            "beat not intended": intent_record(required_beats=[{"text": "", "delivery": "not_intended"}]),
-            "too many beats": intent_record(required_beats=[{"text": "b", "delivery": "implied"}] * 11),
         }
         for name, record in cases.items():
             with self.subTest(name), self.assertRaises(ContractError):
@@ -116,12 +144,34 @@ class IntentRecordContractTests(unittest.TestCase):
         with self.assertRaises(ContractError):
             validate_intent_record(["not", "an", "object"])
 
+    def test_errors_name_keys_but_never_record_values(self):
+        secret = "Fictional secret benefit 7c1e"
+        cases = [
+            intent_record(intended={"key_benefit": secret + " https://example.test"}),
+            intent_record(intended={"key_benefit": secret * 20}),
+            intent_record(delivery={"key_benefit": secret}),
+            intent_record(note=secret + " a@b.test"),
+        ]
+        for record in cases:
+            with self.assertRaises(ContractError) as caught:
+                validate_intent_record(record)
+            self.assertNotIn(secret, str(caught.exception))
+
     def test_not_intended_and_omitted_in_edit_rules(self):
-        validate_intent_record(intent_record(support={"text": "", "delivery": "not_intended"}))
+        validate_intent_record(intent_record(intended={"support": ""}, delivery={"support": "not_intended"}))
         # Omitted in edit was intended, so its intended text must be present.
-        validate_intent_record(intent_record(support={"text": "Lab test", "delivery": "omitted_in_edit"}))
+        validate_intent_record(intent_record(intended={"support": "Lab test"}, delivery={"support": "omitted_in_edit"}))
         with self.assertRaises(ContractError):
-            validate_intent_record(intent_record(support={"text": "", "delivery": "omitted_in_edit"}))
+            validate_intent_record(intent_record(intended={"support": ""}, delivery={"support": "omitted_in_edit"}))
+
+    def test_coding_units_are_derived_without_changing_the_record(self):
+        record = intent_record(delivery={"support": "visual_only"})
+        before = json.dumps(record, sort_keys=True)
+        units = intent_coding_units(record)
+        self.assertEqual(list(units), list(INTENT_FIELDS))
+        self.assertEqual(units["support"], {"text": record["intended"]["support"], "delivery": "visual_only"})
+        self.assertEqual(units["tone"], {"text": "", "delivery": "not_intended"})
+        self.assertEqual(json.dumps(record, sort_keys=True), before)
 
 
 class IntentResponseContractTests(unittest.TestCase):
