@@ -132,8 +132,9 @@ This example is fictional and says nothing about the sealed records:
 One database serves one study: the server refuses a database that already holds
 the other study's submissions, or repeat assignments. Intent assignments have no
 hidden repeats, because a repeat is a second exposure. `/api/next` adds the
-top-level fields `study`, `play_limit` and `plays_used` (the current
-assignment's recorded plays; `null` during annotation). The assignment object
+top-level fields `study`, `play_limit`, `plays_used` (the current
+assignment's recorded plays; `null` during annotation) and
+`collection_closed`. The assignment object
 keeps the same neutral fields as annotation, with no artifact ID, filename or
 SHA-256.
 
@@ -193,7 +194,10 @@ The viewer then submits to `POST /api/intent-responses/<assignment_id>?rater=`:
 Receipts follow the annotation semantics above: `201` with `response_id` and
 `completed_at` for the first save, `200` with `replayed: true` for an exact
 retry, `409` for a different response to a completed assignment, `400` for a
-definite pre-write rejection, and `503` when the outcome is unknown. The PASS/HOLD
+definite pre-write rejection, and `503` when the outcome is unknown. A `409`
+from a frozen collection also sets `collection_closed: true`: it is a definite
+rejection with no write, so the browser clears its recovery record and shows a
+final "collection closed" screen instead of offering a retry. The PASS/HOLD
 endpoint returns `404` while the intent study runs, and the intent endpoint
 returns `404` during annotation.
 
@@ -206,9 +210,10 @@ Responses are stored in `intent_responses`. Database triggers reject every
 order, as JSON (or CSV with one column per component part). It prints the
 SHA-256 of the exact bytes written and records it, with the response count, in
 the append-only `intent_freezes` table. Export and freeze run in one write
-transaction. The first freeze closes collection: later new responses return
-`409`, while an exact retry of an already-saved response still receives its
-original receipt. Exports contain the artifact SHA-256 but no artifact ID or
+transaction. The first freeze closes collection: later new responses and play
+starts return `409` with `collection_closed: true`, while an exact retry of an
+already-saved response still receives its original receipt. After the freeze,
+`/api/next` returns `collection_closed: true` and no assignment. Exports contain the artifact SHA-256 but no artifact ID or
 filename. The freeze must exist before any intent record is revealed.
 
 ## Adjudication

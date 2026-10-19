@@ -14,8 +14,8 @@ from .contracts import (
     validate_annotation_payload, validate_intent_response_payload,
 )
 from .store import (
-    CollectionFrozen, PlayRefused, connect, intent_plays_used, next_assignment, progress,
-    record_intent_play, save_annotation, save_intent_response, saved_intent_receipt,
+    CollectionFrozen, PlayRefused, connect, intent_collection_frozen, intent_plays_used,
+    next_assignment, progress, record_intent_play, save_annotation, save_intent_response, saved_intent_receipt,
 )
 
 
@@ -120,7 +120,9 @@ class LabHandler(BaseHTTPRequestHandler):
                 repeats = self.study != "intent"
                 plays_used = None
                 with connect(self.db_path) as db:
-                    assignment = next_assignment(db, rater, repeats=repeats)
+                    # After the freeze no assignment is offered: nothing could be saved.
+                    closed = self.study == "intent" and intent_collection_frozen(db)
+                    assignment = None if closed else next_assignment(db, rater, repeats=repeats)
                     state = progress(db, rater, repeats=repeats)
                     if assignment and self.study == "intent":
                         # Restored on every reload, so re-entry never resets exposure.
@@ -138,6 +140,7 @@ class LabHandler(BaseHTTPRequestHandler):
                 return self._json(200, {
                     "assignment": assignment, "progress": state,
                     "study": self.study, "play_limit": self.play_limit, "plays_used": plays_used,
+                    "collection_closed": closed,
                 })
             if parsed.path.startswith("/api/media/"):
                 assignment_id = parsed.path.rsplit("/", 1)[-1]
@@ -277,6 +280,8 @@ class LabHandler(BaseHTTPRequestHandler):
         201 is a new write, 200 an exact replay, 409 a different submission
         for a completed assignment or a frozen collection, 400 a definite
         pre-write rejection, and 503 a storage error with an unknown outcome.
+        A frozen collection's 409 sets ``collection_closed``: nothing was
+        written and no retry can succeed, so the client may stop retrying.
         """
         try:
             rater = self._rater(query)
@@ -299,7 +304,9 @@ class LabHandler(BaseHTTPRequestHandler):
                     result = {**receipt, "replayed": True}
                     status = HTTPStatus.OK
             return self._json(status, result)
-        except (ConflictingAnnotation, CollectionFrozen) as exc:
+        except CollectionFrozen as exc:
+            return self._json(HTTPStatus.CONFLICT, {"error": str(exc), "collection_closed": True})
+        except ConflictingAnnotation as exc:
             return self._json(HTTPStatus.CONFLICT, {"error": str(exc)})
         except sqlite3.OperationalError:
             # A lock, I/O error, or interrupted transaction has an ambiguous

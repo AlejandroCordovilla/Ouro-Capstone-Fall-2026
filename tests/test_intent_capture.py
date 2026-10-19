@@ -398,6 +398,7 @@ class IntentApiTests(unittest.TestCase):
         self.assertEqual(body["study"], "intent")
         self.assertEqual(body["play_limit"], 2)
         self.assertEqual(body["plays_used"], 0)
+        self.assertIs(body["collection_closed"], False)
         self.assertEqual(body["progress"], {"completed": 0, "total": 4})
         self.assertEqual(set(body["assignment"]), {
             "assignment_id", "sequence", "started_at", "mime_type", "modality",
@@ -427,7 +428,10 @@ class IntentApiTests(unittest.TestCase):
 
         different = copy.deepcopy(payload)
         different["components"]["support"]["recall"] = "Something else"
-        self.assertEqual(self.post(url, different)[0], 409)
+        status, conflict = self.post(url, different)
+        self.assertEqual(status, 409)
+        # A conflict is not a closed collection; only a freeze sets the flag.
+        self.assertNotIn("collection_closed", conflict)
         self.assertEqual(self.post(url, intent_response(play_count=3))[0], 400)
         self.assertEqual(self.post(url, intent_response(verdict="PASS"))[0], 400)
         # Another viewer cannot answer, or learn about, this assignment.
@@ -563,14 +567,25 @@ class IntentApiTests(unittest.TestCase):
 
         # After the freeze, new responses are refused but an exact retry
         # of an already-saved response still gets its original receipt.
-        second = self.next(base, "viewer-a")[1]["assignment"]["assignment_id"]
+        # /api/next no longer offers it, so take the open assignment from storage.
+        with database(db_path) as db:
+            second = db.execute(
+                "SELECT assignment_id FROM assignments WHERE rater_id='viewer-a' "
+                "AND completed_at IS NULL ORDER BY sequence LIMIT 1",
+            ).fetchone()[0]
         status, refused = self.play(base, second, "viewer-a", 1)
         self.assertEqual(status, 409)
         self.assertEqual((refused["collection_closed"], refused["plays_used"]), (True, 0))
         status, error = self.post(f"{base}/api/intent-responses/{second}?rater=viewer-a", intent_response())
         self.assertEqual(status, 409)
         self.assertIn("frozen", error["error"])
+        self.assertIs(error["collection_closed"], True)
         self.assertEqual(self.post(first_url, intent_response())[0], 200)
+        # A reload after the freeze offers no clip that could never be saved.
+        body = self.next(base, "viewer-a")[1]
+        self.assertIsNone(body["assignment"])
+        self.assertIs(body["collection_closed"], True)
+        self.assertIs(self.next(base, "viewer-new")[1]["collection_closed"], True)
 
 
 if __name__ == "__main__":

@@ -188,6 +188,19 @@ function prepareClip(video, assignmentId, playsUsed) {
   updatePlayControls();
 }
 
+// A freeze is a known, final rejection: nothing was written and no retry can
+// succeed. Unlike a lost acknowledgement or a 503, there is nothing to recover.
+function showCollectionClosed(unsaved) {
+  clearAssignment();
+  $('error').textContent = '';
+  $('retry-save').classList.add('hidden');
+  $('retry-load').classList.add('hidden');
+  $('progress').textContent = 'Collection closed';
+  $('closed-unsaved').classList[unsaved ? 'remove' : 'add']('hidden');
+  $('workspace').classList.add('hidden');
+  $('closed').classList.remove('hidden');
+}
+
 async function recordPlay(clip) {
   const url = `/api/intent-plays/${state.clipAssignmentId}?rater=${encodeURIComponent(state.rater)}`;
   let reply;
@@ -208,6 +221,10 @@ async function recordPlay(clip) {
   }
   if (state.clip !== clip) return false;
   const {response, body} = reply;
+  if (response.status === 409 && body?.collection_closed === true) {
+    showCollectionClosed(false);
+    return false;
+  }
   if (Number.isInteger(body?.plays_used)) state.plays = body.plays_used;
   if (!response.ok || !Number.isInteger(body?.plays_used)) {
     $('error').textContent = body?.error || 'The play could not be recorded; try again.';
@@ -343,8 +360,16 @@ async function sendPendingSave() {
     }, 'Timed out waiting for the save acknowledgement');
     if (state.pendingSave !== pending) return;
     if (!response.ok) {
-      // The API validates before writing and reserves 400 for a definite
-      // rejection. Other failures can have an unknown commit outcome.
+      // The API validates before writing and reserves 400 and a frozen
+      // collection's 409 for definite no-write rejections. Any other failure
+      // keeps the frozen judgment for an exact retry.
+      if (response.status === 409 && body?.collection_closed === true) {
+        pending.rejected = true;
+        discardRecoveryRecord();
+        state.pendingSave = null;
+        showCollectionClosed(true);
+        return;
+      }
       if (response.status === 400) {
         pending.rejected = true;
         discardRecoveryRecord();
@@ -404,6 +429,10 @@ async function loadNext() {
     $('progress').textContent = `${body.progress.completed} / ${body.progress.total} complete`;
     showStudy(body.study);
     state.playLimit = Number.isInteger(body.play_limit) ? body.play_limit : null;
+    if (body.collection_closed === true) {
+      showCollectionClosed(false);
+      return;
+    }
     if (!body.assignment) {
       $('workspace').classList.add('hidden');
       $('done').classList.remove('hidden');

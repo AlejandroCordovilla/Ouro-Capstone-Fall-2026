@@ -820,3 +820,106 @@ test('a counted play that fails to start retries without a second count', async 
   assert.equal(playPosts(lab).length, 1);
   assert.equal(lab.element('plays-left').textContent, '1 of 2 plays left');
 });
+
+const closedReply = {ok: false, status: 409, body: {
+  error: 'intent responses are frozen for reveal; collection is closed', collection_closed: true,
+}};
+
+function assertClosed(lab, {unsaved}) {
+  assert.equal(lab.element('closed').classList.contains('hidden'), false);
+  assert.equal(lab.element('closed-unsaved').classList.contains('hidden'), !unsaved);
+  assert.equal(lab.element('workspace').classList.contains('hidden'), true);
+  assert.equal(lab.element('retry-save').classList.contains('hidden'), true);
+  assert.equal(lab.element('retry-load').classList.contains('hidden'), true);
+  assert.doesNotMatch(lab.element('error').textContent, /Save status is unknown/);
+  assert.equal(lab.element('error').textContent, '');
+  assert.equal(lab.assignment(), null);
+  assert.equal(lab.element('submit').disabled, true);
+  assert.equal(lab.storage.entries.has('ouro-eval-lab-pending-save-v1'), false);
+}
+
+test('a save refused by a frozen collection is a final closed state, not an unknown one', async () => {
+  // Reviewer repro: after a valid freeze, submit the next open assignment.
+  const lab = harness([intentNext(clip('b'), 1), played(1), closedReply]);
+  await lab.signIn();
+  await watch(lab);
+  fillIntent(lab);
+  await lab.submit();
+  assertClosed(lab, {unsaved: true});
+  await lab.retrySave();
+  await lab.submit();
+  assert.equal(responsePosts(lab).length, 1);
+});
+
+test('a conflicting 409 without the closed flag still holds the frozen judgment', async () => {
+  const lab = harness([
+    intentNext(clip('a')), played(1),
+    {ok: false, status: 409, body: {error: 'assignment already completed with a different response'}},
+  ]);
+  lab.element('closed').classList.add('hidden');  // as in index.html
+  await lab.signIn();
+  await watch(lab);
+  fillIntent(lab);
+  await lab.submit();
+  assert.equal(lab.element('closed').classList.contains('hidden'), true);
+  assert.equal(lab.element('retry-save').classList.contains('hidden'), false);
+  assert.equal(lab.storage.entries.has('ouro-eval-lab-pending-save-v1'), true);
+});
+
+test('a recovered save that meets a freeze clears recovery and closes', async () => {
+  const storage = {entries: new Map()};
+  const beforeReload = harness([intentNext(clip('a')), played(1), new Promise(() => {})], [], storage);
+  await beforeReload.signIn();
+  await watch(beforeReload);
+  fillIntent(beforeReload);
+  const original = beforeReload.submit();
+  await flushAsync();
+  beforeReload.expireTimeouts();
+  await original;
+  assert.match(beforeReload.element('error').textContent, /Save status is unknown/);
+
+  const afterReload = harness([closedReply], [], storage);
+  await afterReload.signIn();
+  await afterReload.retrySave();
+  assertClosed(afterReload, {unsaved: true});
+});
+
+test('an exact retry confirmed after the freeze still advances normally', async () => {
+  const lab = harness([
+    intentNext(clip('a')), played(1), new Promise(() => {}),
+    {ok: true, status: 200, body: {response_id: 'response-a', replayed: true}},
+    {ok: true, body: {assignment: null, progress: {completed: 1, total: 4}, study: 'intent',
+      play_limit: 2, plays_used: null, collection_closed: true}},
+  ]);
+  await lab.signIn();
+  await watch(lab);
+  fillIntent(lab);
+  const original = lab.submit();
+  await flushAsync();
+  lab.expireTimeouts();
+  await original;
+  await lab.retrySave();
+  assertClosed(lab, {unsaved: false});
+  assert.equal(responsePosts(lab).length, 2);
+});
+
+test('loading after the freeze shows the closed state instead of a clip', async () => {
+  const lab = harness([{ok: true, body: {
+    assignment: null, progress: {completed: 1, total: 4}, study: 'intent',
+    play_limit: 2, plays_used: null, collection_closed: true,
+  }}]);
+  lab.element('done').classList.add('hidden');  // as in index.html
+  await lab.signIn();
+  assertClosed(lab, {unsaved: false});
+  assert.equal(lab.element('done').classList.contains('hidden'), true);
+  assert.equal(lab.element('media').children.length, 0);
+});
+
+test('a play refused by a frozen collection closes without playing', async () => {
+  const lab = harness([intentNext(clip('a')), {...closedReply, body: {...closedReply.body, plays_used: 0}}]);
+  await lab.signIn();
+  const video = lab.element('media').children[0];
+  await lab.element('play-clip').listeners.click();
+  assert.equal(video.played, undefined);
+  assertClosed(lab, {unsaved: false});
+});
