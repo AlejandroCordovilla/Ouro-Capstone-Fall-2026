@@ -26,7 +26,7 @@ def main() -> int:
     parser.add_argument("--manifest", type=Path, default=DEFAULT_DIR / "manifest.json")
     parser.add_argument(
         "--skip-schema", action="store_true",
-        help="check commitments only, while the intent-record schema awaits sponsor confirmation",
+        help="check commitments only, without the intent-record contract",
     )
     args = parser.parse_args()
     problems = verify(args.commitments, args.records, args.manifest, schema=not args.skip_schema)

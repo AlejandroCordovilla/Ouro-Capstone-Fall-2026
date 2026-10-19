@@ -20,22 +20,35 @@ from pathlib import Path
 from ouro_eval_lab.api import LabHandler
 from ouro_eval_lab.cli import main as cli_main
 from ouro_eval_lab.contracts import (
-    INTENT_FIELDS, ContractError, normalize_intent_response, validate_intent_record,
-    validate_intent_response_payload,
+    INTENT_DELIVERY_CODES, INTENT_FIELDS, INTENT_RECORD_KEYS, ContractError, intent_coding_units,
+    normalize_intent_response, validate_intent_record, validate_intent_response_payload,
 )
 from ouro_eval_lab.runner import export_intent_responses
 from ouro_eval_lab.store import (
-    CollectionFrozen, connect, ingest, next_assignment, record_intent_freeze, save_annotation,
-    save_intent_response, study_conflict,
+    CollectionFrozen, PlayRefused, connect, ingest, intent_plays_used, next_assignment,
+    record_intent_freeze, record_intent_play, save_annotation, save_intent_response, study_conflict,
 )
 
 
-def intent_record(**overrides):
+def intent_record(intended=None, delivery=None, **overrides):
+    """A fictional record in the committed sponsor envelope (nested intended/delivery).
+
+    The structure matches the sealed records; every value here is invented and
+    says nothing about their content.
+    """
     record = {
         "artifact_id": "syn-x", "relative_path": "clipX.mp4", "salt": "9f2c41aa",
-        **{field: {"text": f"Synthetic {field}", "delivery": "explicit_text"} for field in INTENT_FIELDS},
+        "schema": "fictional-intent-record", "record_type": "fictional_intent_record",
+        "fictional": True, "frozen_at": "2026-01-01T00:00:00Z",
+        "note": "Fictional structural fixture for tests; not a sealed study record.",
+        "delivery_codes": sorted(INTENT_DELIVERY_CODES),
+        "intended": {field: f"Fictional {field} for the Glimmerbox lamp" for field in INTENT_FIELDS},
+        "delivery": {field: "explicit_text" for field in INTENT_FIELDS},
     }
-    record["tone"] = {"text": "", "delivery": "not_intended"}
+    record["intended"]["tone"] = ""
+    record["delivery"]["tone"] = "not_intended"
+    record["intended"].update(intended or {})
+    record["delivery"].update(delivery or {})
     record.update(overrides)
     return record
 
@@ -88,27 +101,42 @@ def ingest_synthetic(root: Path, count: int = 4) -> Path:
 
 
 class IntentRecordContractTests(unittest.TestCase):
-    def test_accepts_readme_fields_with_delivery_codes(self):
+    def test_accepts_the_committed_nested_envelope(self):
         validate_intent_record(intent_record())
-        validate_intent_record(intent_record(required_beats=[
-            {"text": "Product shown in use", "delivery": "visual_only"},
-        ]))
+        self.assertEqual(sorted(intent_record()), sorted(INTENT_RECORD_KEYS))
+
+    def test_rejects_the_superseded_top_level_component_shape(self):
+        # Sprint 2's provisional 1.0.0 shape: seven top-level {text, delivery} items.
+        old = {k: v for k, v in intent_record().items() if k not in {"intended", "delivery"}}
+        old.update({field: {"text": "Fictional", "delivery": "implied"} for field in INTENT_FIELDS})
+        with self.assertRaises(ContractError):
+            validate_intent_record(old)
 
     def test_rejects_unknown_missing_oversized_and_uncontrolled_values(self):
+        record = intent_record()
+        del record["intended"]["support"]
         cases = {
             "unknown/private key": intent_record(prompt="internal"),
-            "missing field": {k: v for k, v in intent_record().items() if k != "support"},
-            "bad delivery": intent_record(support={"text": "x", "delivery": "spoken"}),
-            "extra item key": intent_record(support={"text": "x", "delivery": "implied", "notes": ""}),
-            "oversized text": intent_record(support={"text": "x" * 301, "delivery": "implied"}),
-            "delivered but empty": intent_record(support={"text": " ", "delivery": "explicit_text"}),
-            "url in text": intent_record(call_to_action={"text": "Visit https://example.test", "delivery": "explicit_text"}),
-            "email in text": intent_record(audience={"text": "ask a@b.test", "delivery": "implied"}),
+            "missing envelope key": {k: v for k, v in intent_record().items() if k != "note"},
+            "missing component": record,
+            "extra component": intent_record(intended={"offer": "Fictional offer"}),
+            "component object, not string": intent_record(intended={"support": {"text": "x"}}),
+            "bad delivery": intent_record(delivery={"support": "spoken"}),
+            "delivery not in record codes": intent_record(
+                delivery_codes=["explicit_text", "not_intended"], delivery={"support": "implied"}),
+            "uncontrolled delivery_codes": intent_record(delivery_codes=["explicit_text", "spoken"]),
+            "duplicate delivery_codes": intent_record(delivery_codes=["implied", "implied"]),
+            "oversized text": intent_record(intended={"support": "x" * 301}),
+            "delivered but empty": intent_record(intended={"support": " "}),
+            "url in text": intent_record(intended={"call_to_action": "Visit https://example.test"}),
+            "email in text": intent_record(intended={"audience": "ask a@b.test"}),
+            "url in note": intent_record(note="see www.example.test"),
+            "not fictional": intent_record(fictional=False),
+            "naive frozen_at": intent_record(frozen_at="2026-01-01T00:00:00"),
+            "empty schema": intent_record(schema=""),
             "path with folder": intent_record(relative_path="../clipX.mp4"),
             "bad artifact id": intent_record(artifact_id="syn x"),
             "empty salt": intent_record(salt=""),
-            "beat not intended": intent_record(required_beats=[{"text": "", "delivery": "not_intended"}]),
-            "too many beats": intent_record(required_beats=[{"text": "b", "delivery": "implied"}] * 11),
         }
         for name, record in cases.items():
             with self.subTest(name), self.assertRaises(ContractError):
@@ -116,12 +144,34 @@ class IntentRecordContractTests(unittest.TestCase):
         with self.assertRaises(ContractError):
             validate_intent_record(["not", "an", "object"])
 
+    def test_errors_name_keys_but_never_record_values(self):
+        secret = "Fictional secret benefit 7c1e"
+        cases = [
+            intent_record(intended={"key_benefit": secret + " https://example.test"}),
+            intent_record(intended={"key_benefit": secret * 20}),
+            intent_record(delivery={"key_benefit": secret}),
+            intent_record(note=secret + " a@b.test"),
+        ]
+        for record in cases:
+            with self.assertRaises(ContractError) as caught:
+                validate_intent_record(record)
+            self.assertNotIn(secret, str(caught.exception))
+
     def test_not_intended_and_omitted_in_edit_rules(self):
-        validate_intent_record(intent_record(support={"text": "", "delivery": "not_intended"}))
+        validate_intent_record(intent_record(intended={"support": ""}, delivery={"support": "not_intended"}))
         # Omitted in edit was intended, so its intended text must be present.
-        validate_intent_record(intent_record(support={"text": "Lab test", "delivery": "omitted_in_edit"}))
+        validate_intent_record(intent_record(intended={"support": "Lab test"}, delivery={"support": "omitted_in_edit"}))
         with self.assertRaises(ContractError):
-            validate_intent_record(intent_record(support={"text": "", "delivery": "omitted_in_edit"}))
+            validate_intent_record(intent_record(intended={"support": ""}, delivery={"support": "omitted_in_edit"}))
+
+    def test_coding_units_are_derived_without_changing_the_record(self):
+        record = intent_record(delivery={"support": "visual_only"})
+        before = json.dumps(record, sort_keys=True)
+        units = intent_coding_units(record)
+        self.assertEqual(list(units), list(INTENT_FIELDS))
+        self.assertEqual(units["support"], {"text": record["intended"]["support"], "delivery": "visual_only"})
+        self.assertEqual(units["tone"], {"text": "", "delivery": "not_intended"})
+        self.assertEqual(json.dumps(record, sort_keys=True), before)
 
 
 class IntentResponseContractTests(unittest.TestCase):
@@ -186,6 +236,7 @@ class IntentStoreTests(unittest.TestCase):
             db_path = ingest_synthetic(Path(directory))
             with database(db_path) as db:
                 assignment = next_assignment(db, "viewer-a", repeats=False)
+                record_intent_play(db, assignment["assignment_id"], "viewer-a", 1, 2)
                 save_intent_response(
                     db, assignment["assignment_id"], "viewer-a",
                     normalize_intent_response(intent_response()), 2,
@@ -193,6 +244,8 @@ class IntentStoreTests(unittest.TestCase):
                 record_intent_freeze(db, "a" * 64, "json", 1)
             for sql in ("UPDATE intent_responses SET other_beats='changed'",
                         "DELETE FROM intent_responses",
+                        "UPDATE intent_plays SET play_number=0",
+                        "DELETE FROM intent_plays",
                         "UPDATE intent_freezes SET export_sha256='b'",
                         "DELETE FROM intent_freezes"):
                 with self.subTest(sql), self.assertRaisesRegex(sqlite3.DatabaseError, "append-only"):
@@ -207,6 +260,7 @@ class IntentStoreTests(unittest.TestCase):
             normalized = normalize_intent_response(intent_response())
             with database(db_path) as db:
                 first = next_assignment(db, "viewer-a", repeats=False)
+                record_intent_play(db, first["assignment_id"], "viewer-a", 1, 2)
                 save_intent_response(db, first["assignment_id"], "viewer-a", normalized, 2)
                 with self.assertRaisesRegex(ValueError, "already completed"):
                     save_intent_response(db, first["assignment_id"], "viewer-a", normalized, 2)
@@ -216,6 +270,37 @@ class IntentStoreTests(unittest.TestCase):
                 second = next_assignment(db, "viewer-a", repeats=False)
                 with self.assertRaises(CollectionFrozen):
                     save_intent_response(db, second["assignment_id"], "viewer-a", normalized, 2)
+                # No exposure is recorded after the freeze either.
+                with self.assertRaises(CollectionFrozen):
+                    record_intent_play(db, second["assignment_id"], "viewer-a", 1, 2)
+
+    def test_play_starts_are_durable_ordered_limited_and_bind_the_response(self):
+        with scratch() as directory:
+            db_path = ingest_synthetic(Path(directory))
+            with database(db_path) as db:
+                aid = next_assignment(db, "viewer-a", repeats=False)["assignment_id"]
+                with self.assertRaisesRegex(PlayRefused, "must be 1"):
+                    record_intent_play(db, aid, "viewer-a", 2, 2)
+                first = record_intent_play(db, aid, "viewer-a", 1, 2)
+                self.assertEqual(first["plays_used"], 1)
+                # A lost reply re-sends the same number: replayed, not counted twice.
+                self.assertEqual(record_intent_play(db, aid, "viewer-a", 1, 2),
+                                 {**first, "replayed": True})
+                record_intent_play(db, aid, "viewer-a", 2, 2)
+                with self.assertRaisesRegex(PlayRefused, "limit of 2"):
+                    record_intent_play(db, aid, "viewer-a", 3, 2)
+                with self.assertRaisesRegex(ValueError, "not found for rater"):
+                    record_intent_play(db, aid, "viewer-b", 3, 2)
+                self.assertEqual(intent_plays_used(db, aid), 2)
+                # The response must report the recorded count, not a browser counter.
+                for claimed in (1, 0):
+                    with self.subTest(claimed=claimed), self.assertRaisesRegex(ValueError, "2 plays recorded"):
+                        save_intent_response(db, aid, "viewer-a", normalize_intent_response(
+                            intent_response(play_count=claimed)), 2)
+                save_intent_response(db, aid, "viewer-a", normalize_intent_response(
+                    intent_response(play_count=2)), 2)
+                with self.assertRaisesRegex(PlayRefused, "already completed"):
+                    record_intent_play(db, aid, "viewer-a", 3, 5)
 
     def test_intent_assignments_have_no_repeat_exposures(self):
         with scratch() as directory:
@@ -249,6 +334,7 @@ class IntentStoreTests(unittest.TestCase):
                 self.assertIsNone(study_conflict(db, "annotation"))
             with database(intent_db) as db:
                 assignment = next_assignment(db, "viewer-a", repeats=False)
+                record_intent_play(db, assignment["assignment_id"], "viewer-a", 1, 2)
                 save_intent_response(
                     db, assignment["assignment_id"], "viewer-a",
                     normalize_intent_response(intent_response()), 2,
@@ -289,6 +375,9 @@ class IntentApiTests(unittest.TestCase):
         except urllib.error.HTTPError as error:
             return error.code, json.load(error)
 
+    def play(self, base, assignment_id, rater, number):
+        return self.post(f"{base}/api/intent-plays/{assignment_id}?rater={rater}", {"play_number": number})
+
     def next(self, base, rater):
         with urllib.request.urlopen(f"{base}/api/next?rater={rater}") as response:
             raw = response.read().decode()
@@ -308,6 +397,8 @@ class IntentApiTests(unittest.TestCase):
                 self.assertNotIn(digest, raw)
         self.assertEqual(body["study"], "intent")
         self.assertEqual(body["play_limit"], 2)
+        self.assertEqual(body["plays_used"], 0)
+        self.assertIs(body["collection_closed"], False)
         self.assertEqual(body["progress"], {"completed": 0, "total": 4})
         self.assertEqual(set(body["assignment"]), {
             "assignment_id", "sequence", "started_at", "mime_type", "modality",
@@ -323,6 +414,7 @@ class IntentApiTests(unittest.TestCase):
         assignment_id = self.next(base, "viewer-a")[1]["assignment"]["assignment_id"]
         url = f"{base}/api/intent-responses/{assignment_id}?rater=viewer-a"
         payload = intent_response()
+        self.assertEqual(self.play(base, assignment_id, "viewer-a", 1)[0], 201)
 
         status, created = self.post(url, payload)
         self.assertEqual(status, 201)
@@ -336,7 +428,10 @@ class IntentApiTests(unittest.TestCase):
 
         different = copy.deepcopy(payload)
         different["components"]["support"]["recall"] = "Something else"
-        self.assertEqual(self.post(url, different)[0], 409)
+        status, conflict = self.post(url, different)
+        self.assertEqual(status, 409)
+        # A conflict is not a closed collection; only a freeze sets the flag.
+        self.assertNotIn("collection_closed", conflict)
         self.assertEqual(self.post(url, intent_response(play_count=3))[0], 400)
         self.assertEqual(self.post(url, intent_response(verdict="PASS"))[0], 400)
         # Another viewer cannot answer, or learn about, this assignment.
@@ -386,11 +481,52 @@ class IntentApiTests(unittest.TestCase):
         raw, body = self.next(base, "annotator-a")
         self.assertEqual(body["study"], "annotation")
         self.assertIsNone(body["play_limit"])
+        self.assertIsNone(body["plays_used"])
         assignment_id = body["assignment"]["assignment_id"]
         status, _ = self.post(
             f"{base}/api/intent-responses/{assignment_id}?rater=annotator-a", intent_response(),
         )
         self.assertEqual(status, 404)
+        self.assertEqual(self.play(base, assignment_id, "annotator-a", 1)[0], 404)
+
+    def test_reload_restores_exposure_and_the_response_reports_every_play(self):
+        # Reviewer repro: exhaust both plays, reload / re-enter as the same
+        # rater, try a third play, then save. The count must survive re-entry.
+        directory = self.enterContext(scratch())
+        db_path = ingest_synthetic(Path(directory))
+        base = self.serve(db_path)
+        assignment_id = self.next(base, "viewer-a")[1]["assignment"]["assignment_id"]
+        status, first = self.play(base, assignment_id, "viewer-a", 1)
+        self.assertEqual((status, first["plays_used"]), (201, 1))
+        self.assertEqual(self.play(base, assignment_id, "viewer-a", 2)[0], 201)
+        self.assertEqual(self.play(base, assignment_id, "viewer-a", 2)[0], 200)
+
+        body = self.next(base, "viewer-a")[1]
+        self.assertEqual(body["assignment"]["assignment_id"], assignment_id)
+        self.assertEqual(body["plays_used"], 2)
+        status, refused = self.play(base, assignment_id, "viewer-a", 3)
+        self.assertEqual(status, 409)
+        self.assertEqual(refused["plays_used"], 2)
+        self.assertIn("limit", refused["error"])
+        self.assertNotIn("collection_closed", refused)
+        for bad in ({"play_number": 0}, {"play_number": "3"}, {"play_number": 1, "x": 1}, {}):
+            with self.subTest(bad=bad):
+                self.assertEqual(self.post(
+                    f"{base}/api/intent-plays/{assignment_id}?rater=viewer-a", bad)[0], 400)
+        # Another rater can neither play nor learn this assignment's count.
+        status, other = self.play(base, assignment_id, "viewer-b", 3)
+        self.assertEqual(status, 400)
+        self.assertNotIn("plays_used", other)
+
+        url = f"{base}/api/intent-responses/{assignment_id}?rater=viewer-a"
+        status, error = self.post(url, intent_response(play_count=1))
+        self.assertEqual(status, 400)
+        self.assertIn("2 plays recorded", error["error"])
+        self.assertEqual(self.post(url, intent_response(play_count=2))[0], 201)
+        with database(db_path) as db:
+            saved = db.execute("SELECT play_count FROM intent_responses").fetchone()[0]
+            plays = db.execute("SELECT COUNT(*) FROM intent_plays").fetchone()[0]
+        self.assertEqual((saved, plays), (2, 2))
 
     def test_freeze_exports_deterministic_bytes_and_closes_collection(self):
         directory = self.enterContext(scratch())
@@ -404,6 +540,7 @@ class IntentApiTests(unittest.TestCase):
         base = self.serve(db_path)
         first = self.next(base, "viewer-a")[1]["assignment"]["assignment_id"]
         first_url = f"{base}/api/intent-responses/{first}?rater=viewer-a"
+        self.assertEqual(self.play(base, first, "viewer-a", 1)[0], 201)
         self.assertEqual(self.post(first_url, intent_response())[0], 201)
 
         printed = io.StringIO()
@@ -430,11 +567,25 @@ class IntentApiTests(unittest.TestCase):
 
         # After the freeze, new responses are refused but an exact retry
         # of an already-saved response still gets its original receipt.
-        second = self.next(base, "viewer-a")[1]["assignment"]["assignment_id"]
+        # /api/next no longer offers it, so take the open assignment from storage.
+        with database(db_path) as db:
+            second = db.execute(
+                "SELECT assignment_id FROM assignments WHERE rater_id='viewer-a' "
+                "AND completed_at IS NULL ORDER BY sequence LIMIT 1",
+            ).fetchone()[0]
+        status, refused = self.play(base, second, "viewer-a", 1)
+        self.assertEqual(status, 409)
+        self.assertEqual((refused["collection_closed"], refused["plays_used"]), (True, 0))
         status, error = self.post(f"{base}/api/intent-responses/{second}?rater=viewer-a", intent_response())
         self.assertEqual(status, 409)
         self.assertIn("frozen", error["error"])
+        self.assertIs(error["collection_closed"], True)
         self.assertEqual(self.post(first_url, intent_response())[0], 200)
+        # A reload after the freeze offers no clip that could never be saved.
+        body = self.next(base, "viewer-a")[1]
+        self.assertIsNone(body["assignment"])
+        self.assertIs(body["collection_closed"], True)
+        self.assertIs(self.next(base, "viewer-new")[1]["collection_closed"], True)
 
 
 if __name__ == "__main__":

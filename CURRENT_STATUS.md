@@ -94,13 +94,15 @@ coerced into Brier/ECE calculations.
 
 Intent Fidelity Stage 1 is implemented (Team C, Sprint 2):
 
-- a provisional intent-record contract `1.0.0`, validated by
-  `scripts/verify_intent_reveal.py` after the commitment check. The sealed
-  record format still needs sponsor confirmation;
+- intent-record contract `2.0.0`, matching the committed nested envelope of
+  the sealed records (structure checked in the PR #23 review), validated by
+  `scripts/verify_intent_reveal.py` after the commitment check;
 - blinded viewer capture: `serve --study intent`, a recall form with certainty
-  and “could not tell”, a counted play limit, no repeat exposures, append-only
+  and “could not tell”, a server-held play limit that survives reload
+  (append-only `intent_plays`), no repeat exposures, append-only
   `intent_responses`, and idempotent receipts;
 - `export-intent`, which freezes responses by SHA-256 and closes collection;
+  the browser shows a final “collection closed” state after the freeze;
 - `reveal`, which refuses until a freeze exists and loads verified records
   into append-only tables bound to that freeze (Sprint 3);
 - a draft coding codebook, `docs/INTENT_CODEBOOK.md` (not yet calibrated or

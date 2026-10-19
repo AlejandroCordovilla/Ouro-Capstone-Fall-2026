@@ -1,6 +1,6 @@
 # Team C implementation plan: status tracker
 
-Team C: Intent Fidelity and Human Perception. Last updated **2026-10-14**.
+Team C: Intent Fidelity and Human Perception. Last updated **2026-10-19**.
 
 Legend: `[x]` done · `[~]` partly done or waiting on someone · `[ ]` not started.
 Notes in *italics* say where the work lives or where it differs from the plan.
@@ -10,20 +10,28 @@ Notes in *italics* say where the work lives or where it differs from the plan.
 | Branch | State |
 |---|---|
 | `team-c/sprint1-walking-skeleton` | Pushed. Sprint 1 docs. No PR (team approved). |
-| `team-c/sprint2-intent-capture` | Pushed. **PR #23** open into `JohnDoughh/Ouro-Capstone-Fall-2026` `main`; awaiting review and CI approval (fork PR). |
-| `team-c/sprint3-reveal-coding` | Pushed. Branched from Sprint 2: reveal command, codebook draft and this tracker. No PR yet (open one after PR #23 merges, or when Sprint 3 is complete). |
+| `team-c/sprint2-intent-capture` | Pushed. **PR #23** into `JohnDoughh/Ouro-Capstone-Fall-2026` `main`. Owner requested changes on 2026-10-19 (3 items); all three fixed and pushed (`eecb8b3`, `ada5158`, `1c90147`). Awaiting re-review. |
+| `team-c/sprint3-reveal-coding` | Pushed. Branched from Sprint 2: reveal command, codebook draft and this tracker; Sprint 2 fixes merged in. No PR yet (open one after PR #23 merges, or when Sprint 3 is complete). |
+
+**PR #23 review (2026-10-19), all addressed**
+
+1. Play count reset on reload/re-entry → server-held `intent_plays` log, restored by `/api/next`; a response's `play_count` must equal it.
+2. Record schema did not match the sealed records → contract `2.0.0` validates the committed nested envelope (`intended`/`delivery` maps plus `artifact_id`, `delivery_codes`, `fictional`, `frozen_at`, `note`, `record_type`, `relative_path`, `salt`, `schema`). No `offer` or `required_beats`. `intent_coding_units()` derives the coding view after verification.
+3. Frozen collection showed "Save status is unknown" → 409 carries `collection_closed`; the UI shows a final closed screen.
+
+Still to do from the review: link this work to the relevant portal cards (team task). Value types of `delivery_codes`, `frozen_at`, `schema`, `record_type` and `note` were inferred from key names; ask the owner/custodian to run `scripts/verify_intent_reveal.py` on the sealed records (errors name keys, never values) to confirm before reveal.
 
 **Next steps, in order**
 
 1. Build coder sheets (`intent-coding-sheet`) and code import (`intent-import-codes`).
 2. Propose the adjudication record shape to the Team A and B delegates, then build it.
 3. Team: calibrate the codebook on the practice anchors; freeze it with the pre-registration.
-4. Team: send the sponsor questions (record format, vocabulary, `offer`/`required_beats`, custodian); name the open roles.
+4. Team: send the sponsor questions (vocabulary mapping, custodian; record format and `offer`/`required_beats` are now answered by the PR #23 review); name the open roles.
 
 **Known issues**
 
 - 8 existing tests fail on Windows only (`WinError 32`): `with connect()` commits but never closes, so connections wait for the garbage collector. Needs a separate shared-infrastructure PR. Linux CI is unaffected; Team C tests work around it.
-- PR #23's CI has not run: an upstream maintainer may need to click "Approve and run".
+- PR #23's hosted CI cannot run: the owner approved it, but an owner-account billing lock stops GitHub Actions. The owner ran the checks locally (Python 3.13).
 - `make` and `gh` on this machine: no `make`, so run the `make check` steps one by one. `gh` is at `C:\Program Files\GitHub CLI\gh.exe` (not on PATH until a restart).
 
 ---
@@ -68,13 +76,13 @@ The repo is a v0.1 public-safe scaffold (Python 3.11 stdlib, SQLite, vanilla-JS 
 
 ### C-1: Sanitized intent-record contract
 
-- [x] `INTENT_CONTRACT_VERSION = "1.0.0"` and `validate_intent_record` in `ouro_eval_lab/contracts.py`
-  - [x] required: `artifact_id`, `relative_path`, `salt`, the seven component fields, each with a `delivery` from the controlled enum *(shape: `{text, delivery}`)*
-  - [x] optional `required_beats[]`
-  - [x] rejects unknown keys, oversized text, URLs and contact details
+- [x] `INTENT_CONTRACT_VERSION = "2.0.0"` and `validate_intent_record` in `ouro_eval_lab/contracts.py`
+  - [x] the committed nested envelope: seven strings under `intended`, seven codes under `delivery`, plus the nine top-level keys *(1.0.0's top-level `{text, delivery}` shape was wrong; fixed after the PR #23 review)*
+  - [x] ~~optional `required_beats[]`~~ *(dropped: not in the records)*
+  - [x] rejects unknown keys, oversized text, URLs and contact details; errors never echo values
 - [x] `scripts/verify_intent_reveal.py` validates each record after the hash check *(plus `--skip-schema`)*
 - [x] Tests *(in `tests/test_intent_capture.py` and `tests/test_public_intent.py`, not `test_contracts.py`)*
-- [ ] **Confirm the record schema with the sponsor before freezing** *(validator is provisional)*
+- [~] **Confirm the record schema with the sponsor before freezing** *(structure confirmed by the owner in the PR #23 review; value types of the metadata keys still inferred)*
 - [x] `docs/DATA_CONTRACT.md` updated
 
 ### C-2: Blinded viewer response capture
@@ -88,9 +96,9 @@ The repo is a v0.1 public-safe scaffold (Python 3.11 stdlib, SQLite, vanilla-JS 
 - [x] Assignment object in `/api/next` unchanged
 - [x] `serve --study intent` *(mode exposed as top-level `study`/`play_limit` in `/api/next` and `/api/health`, not a separate `/api/config`)*
 - [x] UI intent form reusing media readiness, deadline and recovery logic
-- [x] Play limit to standardize exposure *(counted Play button, no scrubbing, default 2)*
+- [x] Play limit to standardize exposure *(counted Play button, no scrubbing, default 2; server-held in `intent_plays` since the PR #23 review, so reload cannot reset it)*
 - [x] `export-intent` (JSON/CSV) with SHA-256 recorded *(in append-only `intent_freezes`; also closes collection)*
-- [x] Tests: API (201/200/409/400, rater isolation, no artifact ID/path/SHA leaks), UI state and blinding, store append-only
+- [x] Tests: API (201/200/409/400, rater isolation, no artifact ID/path/SHA leaks), UI state and blinding, store append-only, play-count reload, frozen-collection closed state
 - [x] *Extras:* no repeat exposures in intent mode; one database per study; rater IDs that look like phone numbers rejected (shared change)
 - [x] Manual browser test by a team member
 
@@ -142,7 +150,7 @@ The repo is a v0.1 public-safe scaffold (Python 3.11 stdlib, SQLite, vanilla-JS 
 ## Verification (per PR and at the end)
 
 - [~] `make check` *(run step by step on Windows; passes apart from the 8 known Windows-only errors)*
-- [x] `node --test tests/web_lab_state.test.cjs` *(34 pass)*
+- [x] `node --test tests/web_lab_state.test.cjs` *(45 pass)*
 - [~] Manual end-to-end check:
   - [x] serve in intent mode on a separate database; answer all 4 clips; replay and timeout retry
   - [x] `export-intent` and record the hash

@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 
 from ouro_eval_lab.cli import main as cli_main
-from ouro_eval_lab.contracts import INTENT_FIELDS
+from ouro_eval_lab.contracts import INTENT_DELIVERY_CODES, INTENT_FIELDS
 from ouro_eval_lab.reveal import RevealRefused, reveal
 from ouro_eval_lab.runner import verify_manifest
 from ouro_eval_lab.store import connect, ingest, initialize, record_intent_freeze
@@ -58,9 +58,16 @@ class Study:
         self.seal()
 
     def record(self, artifact, **overrides):
-        record = {"artifact_id": artifact["artifact_id"], "relative_path": artifact["relative_path"],
-                  "salt": "c0ffee" + artifact["artifact_id"][-1]}
-        record.update({field: {"text": f"Synthetic {field}", "delivery": "explicit_text"} for field in INTENT_FIELDS})
+        """A fictional record in the committed nested envelope; invented values only."""
+        record = {
+            "artifact_id": artifact["artifact_id"], "relative_path": artifact["relative_path"],
+            "salt": "c0ffee" + artifact["artifact_id"][-1],
+            "schema": "fictional-intent-record", "record_type": "fictional_intent_record",
+            "fictional": True, "frozen_at": "2026-01-01T00:00:00Z", "note": "",
+            "delivery_codes": sorted(INTENT_DELIVERY_CODES),
+            "intended": {field: f"Fictional {field}" for field in INTENT_FIELDS},
+            "delivery": {field: "explicit_text" for field in INTENT_FIELDS},
+        }
         record.update(overrides)
         return record
 
@@ -114,7 +121,7 @@ class IntentRevealTests(unittest.TestCase):
         for row, artifact in zip(records, self.study.artifacts):
             self.assertEqual(row["artifact_sha256"], artifact["sha256"])
             self.assertEqual(row["reveal_id"], reveal_row["reveal_id"])
-            self.assertEqual(row["intent_contract_version"], "1.0.0")
+            self.assertEqual(row["intent_contract_version"], "2.0.0")
             # The stored text is the exact committed bytes.
             self.assertEqual(hashlib.sha256(row["record_json"].encode()).hexdigest(), row["record_sha256"])
 
@@ -122,7 +129,7 @@ class IntentRevealTests(unittest.TestCase):
         self.study.freeze()
         name = self.study.records / "clipA.intent.json"
         original = name.read_bytes()
-        name.write_bytes(original.replace(b"Synthetic support", b"Synthetic suppory"))
+        name.write_bytes(original.replace(b"Fictional support", b"Fictional suppory"))
         with self.assertRaisesRegex(RevealRefused, "does not match the commitment"):
             self.study.reveal()
         name.write_bytes(original)
@@ -137,7 +144,7 @@ class IntentRevealTests(unittest.TestCase):
         again = self.study.reveal()
         self.assertTrue(again["already_revealed"])
         self.assertEqual(self.study.count("intent_reveals"), 1)
-        self.study.seal(tone={"text": "", "delivery": "not_intended"})
+        self.study.seal(note="A different fictional note")
         with self.assertRaisesRegex(RevealRefused, "already revealed"):
             self.study.reveal()
         self.assertEqual(self.study.count("intent_records"), 2)
